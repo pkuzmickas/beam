@@ -21,6 +21,7 @@ import javax.annotation.Nullable;
 import org.apache.beam.runners.core.construction.SerializablePipelineOptions;
 import org.apache.beam.runners.flink.translation.wrappers.streaming.io.source.FlinkSource;
 import org.apache.beam.runners.flink.translation.wrappers.streaming.io.source.FlinkSourceSplit;
+import org.apache.beam.runners.flink.translation.wrappers.streaming.io.source.FlinkSourceSplitAssignmentPreference;
 import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.values.WindowedValue;
 import org.apache.flink.api.connector.source.Boundedness;
@@ -46,7 +47,31 @@ public class FlinkBoundedSource<T> extends FlinkSource<T, WindowedValue<T>> {
       SerializablePipelineOptions serializablePipelineOptions,
       Boundedness boundedness,
       int numSplits) {
-    this(stepName, beamSource, serializablePipelineOptions, boundedness, numSplits, null);
+    this(
+        stepName,
+        beamSource,
+        serializablePipelineOptions,
+        boundedness,
+        numSplits,
+        null,
+        FlinkSourceSplitAssignmentPreference.LAZY);
+  }
+
+  public FlinkBoundedSource(
+      String stepName,
+      BoundedSource<T> beamSource,
+      SerializablePipelineOptions serializablePipelineOptions,
+      Boundedness boundedness,
+      int numSplits,
+      FlinkSourceSplitAssignmentPreference splitAssignmentPreference) {
+    this(
+        stepName,
+        beamSource,
+        serializablePipelineOptions,
+        boundedness,
+        numSplits,
+        null,
+        splitAssignmentPreference);
   }
 
   public FlinkBoundedSource(
@@ -56,8 +81,32 @@ public class FlinkBoundedSource<T> extends FlinkSource<T, WindowedValue<T>> {
       Boundedness boundedness,
       int numSplits,
       @Nullable TimestampExtractor<WindowedValue<T>> timestampExtractor) {
+    this(
+        stepName,
+        beamSource,
+        serializablePipelineOptions,
+        boundedness,
+        numSplits,
+        timestampExtractor,
+        FlinkSourceSplitAssignmentPreference.LAZY);
+  }
 
-    super(stepName, beamSource, serializablePipelineOptions, boundedness, numSplits);
+  public FlinkBoundedSource(
+      String stepName,
+      BoundedSource<T> beamSource,
+      SerializablePipelineOptions serializablePipelineOptions,
+      Boundedness boundedness,
+      int numSplits,
+      @Nullable TimestampExtractor<WindowedValue<T>> timestampExtractor,
+      FlinkSourceSplitAssignmentPreference splitAssignmentPreference) {
+
+    super(
+        stepName,
+        beamSource,
+        serializablePipelineOptions,
+        boundedness,
+        numSplits,
+        splitAssignmentPreference);
     this.timestampExtractor = timestampExtractor;
   }
 

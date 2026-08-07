@@ -19,9 +19,6 @@ package org.apache.beam.runners.flink.translation.wrappers.streaming.io.source;
 
 /** Preferred strategy for assigning a bounded Beam source's splits in the Flink runner. */
 public enum FlinkSourceSplitAssignmentPreference {
-  /** Let the Flink runner choose an assignment strategy from the source and execution context. */
-  AUTO,
-
   /** Assign splits when readers request work, allowing idle readers to help slower readers. */
   LAZY,
 

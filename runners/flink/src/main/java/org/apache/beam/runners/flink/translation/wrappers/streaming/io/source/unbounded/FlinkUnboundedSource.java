@@ -21,6 +21,7 @@ import javax.annotation.Nullable;
 import org.apache.beam.runners.core.construction.SerializablePipelineOptions;
 import org.apache.beam.runners.flink.translation.wrappers.streaming.io.source.FlinkSource;
 import org.apache.beam.runners.flink.translation.wrappers.streaming.io.source.FlinkSourceSplit;
+import org.apache.beam.runners.flink.translation.wrappers.streaming.io.source.FlinkSourceSplitAssignmentPreference;
 import org.apache.beam.sdk.io.UnboundedSource;
 import org.apache.beam.sdk.values.ValueWithRecordId;
 import org.apache.beam.sdk.values.WindowedValue;
@@ -58,7 +59,8 @@ public class FlinkUnboundedSource<T> extends FlinkSource<T, WindowedValue<ValueW
         beamSource,
         serializablePipelineOptions,
         Boundedness.CONTINUOUS_UNBOUNDED,
-        numSplits);
+        numSplits,
+        FlinkSourceSplitAssignmentPreference.LAZY);
     this.timestampExtractor = timestampExtractor;
   }
 
