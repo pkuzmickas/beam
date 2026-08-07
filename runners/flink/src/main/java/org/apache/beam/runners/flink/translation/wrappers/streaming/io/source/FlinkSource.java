@@ -18,8 +18,11 @@
 package org.apache.beam.runners.flink.translation.wrappers.streaming.io.source;
 
 import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.Function;
 import org.apache.beam.runners.core.construction.SerializablePipelineOptions;
 import org.apache.beam.runners.flink.FlinkPipelineOptions;
@@ -28,7 +31,6 @@ import org.apache.beam.runners.flink.translation.wrappers.streaming.io.source.bo
 import org.apache.beam.runners.flink.translation.wrappers.streaming.io.source.impulse.BeamImpulseSource;
 import org.apache.beam.runners.flink.translation.wrappers.streaming.io.source.unbounded.FlinkUnboundedSource;
 import org.apache.beam.sdk.io.BoundedSource;
-import org.apache.beam.sdk.io.BoundedSource.SplitAssignmentPreference;
 import org.apache.beam.sdk.io.UnboundedSource;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.flink.api.common.eventtime.Watermark;
@@ -154,8 +156,12 @@ public abstract class FlinkSource<T, OutputT>
           throws Exception {
     SplitEnumerator<FlinkSourceSplit<T>, Map<Integer, List<FlinkSourceSplit<T>>>> enumerator =
         createEnumerator(enumContext, true);
-    checkpoint.forEach(
-        (subtaskId, splitsForSubtask) -> enumerator.addSplitsBack(splitsForSubtask, subtaskId));
+    if (boundedness == Boundedness.BOUNDED) {
+      restoreBoundedSplits(enumerator, enumContext.currentParallelism(), checkpoint);
+    } else {
+      checkpoint.forEach(
+          (subtaskId, splitsForSubtask) -> enumerator.addSplitsBack(splitsForSubtask, subtaskId));
+    }
     return enumerator;
   }
 
@@ -177,18 +183,14 @@ public abstract class FlinkSource<T, OutputT>
   private boolean shouldUseStaticSplitAssignment(
       PipelineOptions pipelineOptions, int sourceParallelism) throws Exception {
     if (sourceParallelism <= 0) {
-      LOG.warn(
-          "Using lazy split assignment for bounded source {} because the source parallelism is "
-              + "not positive: {}",
-          beamSource,
-          sourceParallelism);
-      return false;
+      throw new IllegalArgumentException(
+          "Bounded source parallelism must be positive, but was " + sourceParallelism);
     }
 
     BoundedSource<?> boundedSource = (BoundedSource<?>) beamSource;
-    SplitAssignmentPreference preference = boundedSource.getSplitAssignmentPreference();
-    if (preference != SplitAssignmentPreference.AUTO) {
-      boolean useStaticAssignment = preference == SplitAssignmentPreference.STATIC;
+    FlinkSourceSplitAssignmentPreference preference = getSplitAssignmentPreference(boundedSource);
+    if (preference != FlinkSourceSplitAssignmentPreference.AUTO) {
+      boolean useStaticAssignment = preference == FlinkSourceSplitAssignmentPreference.STATIC;
       LOG.info(
           "Using {} split assignment for bounded source {} from its explicit {} preference",
           useStaticAssignment ? "static" : "lazy",
@@ -213,6 +215,40 @@ public abstract class FlinkSource<T, OutputT>
         estimatedBytesPerReader,
         STATIC_ASSIGNMENT_MIN_BYTES_PER_READER);
     return useStaticAssignment;
+  }
+
+  private FlinkSourceSplitAssignmentPreference getSplitAssignmentPreference(
+      BoundedSource<?> boundedSource) {
+    if (!(boundedSource instanceof FlinkSourceSplitAssignmentProvider)) {
+      return FlinkSourceSplitAssignmentPreference.AUTO;
+    }
+
+    FlinkSourceSplitAssignmentProvider provider =
+        (FlinkSourceSplitAssignmentProvider) boundedSource;
+    return Objects.requireNonNull(
+        provider.getFlinkSourceSplitAssignmentPreference(),
+        "A Flink source split-assignment preference must not be null");
+  }
+
+  private void restoreBoundedSplits(
+      SplitEnumerator<FlinkSourceSplit<T>, Map<Integer, List<FlinkSourceSplit<T>>>> enumerator,
+      int sourceParallelism,
+      Map<Integer, List<FlinkSourceSplit<T>>> checkpoint) {
+    List<FlinkSourceSplit<T>> restoredSplits = new ArrayList<>();
+    checkpoint.values().forEach(restoredSplits::addAll);
+
+    if (enumerator instanceof FlinkSourceSplitEnumerator) {
+      Map<Integer, List<FlinkSourceSplit<T>>> splitsBySubtask = new HashMap<>();
+      for (FlinkSourceSplit<T> split : restoredSplits) {
+        int targetSubtask = Math.floorMod(split.splitIndex(), sourceParallelism);
+        splitsBySubtask.computeIfAbsent(targetSubtask, ignored -> new ArrayList<>()).add(split);
+      }
+      splitsBySubtask.forEach(
+          (subtaskId, splitsForSubtask) -> enumerator.addSplitsBack(splitsForSubtask, subtaskId));
+    } else {
+      // Lazy assignment uses one shared pending queue, so checkpoint subtask keys are irrelevant.
+      enumerator.addSplitsBack(restoredSplits, 0);
+    }
   }
 
   @FunctionalInterface

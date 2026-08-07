@@ -19,10 +19,13 @@ package org.apache.beam.runners.flink.translation.wrappers.streaming.io.source;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -32,7 +35,6 @@ import org.apache.beam.runners.flink.translation.wrappers.streaming.io.TestBound
 import org.apache.beam.runners.flink.translation.wrappers.streaming.io.TestCountingSource;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
-import org.apache.beam.sdk.io.BoundedSource.SplitAssignmentPreference;
 import org.apache.beam.sdk.io.FileBasedSource;
 import org.apache.beam.sdk.io.FileBasedSource.FileBasedReader;
 import org.apache.beam.sdk.io.FileSystems;
@@ -47,6 +49,7 @@ import org.junit.Test;
 /** Unit tests for {@link FlinkSourceSplitEnumerator}. */
 public class FlinkSourceSplitEnumeratorTest {
   private static final long MEBIBYTE = 1024L * 1024L;
+  private static final int BOUNDED_SOURCE_SPLITS = 10;
   private static final int SOURCE_PARALLELISM = 2;
 
   @Test
@@ -86,7 +89,9 @@ public class FlinkSourceSplitEnumeratorTest {
     try (SplitEnumerator<
             FlinkSourceSplit<KV<Integer, Integer>>,
             Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>>>
-        enumerator = createBoundedEnumerator(estimatedSizeBytes, SplitAssignmentPreference.LAZY)) {
+        enumerator =
+            createBoundedEnumerator(
+                estimatedSizeBytes, FlinkSourceSplitAssignmentPreference.LAZY)) {
       assertTrue(enumerator instanceof LazyFlinkSourceSplitEnumerator);
       assertFalse(enumerator instanceof FlinkSourceSplitEnumerator);
     }
@@ -100,14 +105,15 @@ public class FlinkSourceSplitEnumeratorTest {
             FlinkSourceSplit<KV<Integer, Integer>>,
             Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>>>
         enumerator =
-            createBoundedEnumerator(estimatedSizeBytes, SplitAssignmentPreference.STATIC)) {
+            createBoundedEnumerator(
+                estimatedSizeBytes, FlinkSourceSplitAssignmentPreference.STATIC)) {
       assertTrue(enumerator instanceof FlinkSourceSplitEnumerator);
       assertFalse(enumerator instanceof LazyFlinkSourceSplitEnumerator);
     }
   }
 
   @Test
-  public void testLargeFileBasedSourceUsesLazyAssignment() throws Exception {
+  public void testLargeFileBasedSourceUsesAutomaticSizeFallback() throws Exception {
     long estimatedSizeBytes =
         SOURCE_PARALLELISM * FlinkSource.STATIC_ASSIGNMENT_MIN_BYTES_PER_READER;
     TestFileBasedSource testSource = TestFileBasedSource.create(estimatedSizeBytes);
@@ -122,8 +128,89 @@ public class FlinkSourceSplitEnumeratorTest {
 
     try (SplitEnumerator<FlinkSourceSplit<String>, Map<Integer, List<FlinkSourceSplit<String>>>>
         enumerator = source.createEnumerator(context)) {
+      assertTrue(enumerator instanceof FlinkSourceSplitEnumerator);
+      assertFalse(enumerator instanceof LazyFlinkSourceSplitEnumerator);
+    }
+  }
+
+  @Test
+  public void testNullFlinkPreferenceFailsFast() {
+    NullPointerException error =
+        assertThrows(NullPointerException.class, () -> createBoundedEnumerator(0L, null));
+
+    assertTrue(error.getMessage().contains("must not be null"));
+  }
+
+  @Test
+  public void testNonPositiveParallelismFailsBeforeStaticAssignment() {
+    FlinkSource<KV<Integer, Integer>, ?> source =
+        createBoundedSource(0L, FlinkSourceSplitAssignmentPreference.STATIC);
+    TestingSplitEnumeratorContext<FlinkSourceSplit<KV<Integer, Integer>>> context =
+        new TestingSplitEnumeratorContext<>(0);
+
+    IllegalArgumentException error =
+        assertThrows(IllegalArgumentException.class, () -> source.createEnumerator(context));
+
+    assertTrue(error.getMessage().contains("must be positive"));
+  }
+
+  @Test
+  public void testRestoringLazyCheckpointIntoStaticEnumeratorRebalancesSplits() throws Exception {
+    FlinkSource<KV<Integer, Integer>, ?> source =
+        createBoundedSource(0L, FlinkSourceSplitAssignmentPreference.STATIC);
+    TestingSplitEnumeratorContext<FlinkSourceSplit<KV<Integer, Integer>>> context =
+        new TestingSplitEnumeratorContext<>(SOURCE_PARALLELISM);
+    Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>> lazyCheckpoint = new HashMap<>();
+    lazyCheckpoint.put(1, createSplits(0, 1, 2, 3));
+
+    try (SplitEnumerator<
+            FlinkSourceSplit<KV<Integer, Integer>>,
+            Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>>>
+        enumerator = source.restoreEnumerator(context, lazyCheckpoint)) {
+      assertTrue(enumerator instanceof FlinkSourceSplitEnumerator);
+      for (int subtaskId = 0; subtaskId < SOURCE_PARALLELISM; subtaskId++) {
+        context.registerReader(subtaskId, String.valueOf(subtaskId));
+        enumerator.addReader(subtaskId);
+      }
+
+      assertEquals(SOURCE_PARALLELISM, context.getSplitAssignments().size());
+      context
+          .getSplitAssignments()
+          .forEach(
+              (subtaskId, assignment) -> {
+                assertEquals(2, assignment.getAssignedSplits().size());
+                assertTrue(assignment.hasReceivedNoMoreSplitsSignal());
+                assignment
+                    .getAssignedSplits()
+                    .forEach(
+                        split ->
+                            assertEquals(
+                                subtaskId.intValue(),
+                                Math.floorMod(split.splitIndex(), SOURCE_PARALLELISM)));
+              });
+    }
+  }
+
+  @Test
+  public void testRestoringStaticCheckpointIntoLazyEnumeratorPreservesAllSplits() throws Exception {
+    FlinkSource<KV<Integer, Integer>, ?> source =
+        createBoundedSource(0L, FlinkSourceSplitAssignmentPreference.LAZY);
+    TestingSplitEnumeratorContext<FlinkSourceSplit<KV<Integer, Integer>>> context =
+        new TestingSplitEnumeratorContext<>(SOURCE_PARALLELISM);
+    Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>> staticCheckpoint = new HashMap<>();
+    staticCheckpoint.put(0, createSplits(0, 2));
+    staticCheckpoint.put(1, createSplits(1, 3));
+
+    try (SplitEnumerator<
+            FlinkSourceSplit<KV<Integer, Integer>>,
+            Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>>>
+        enumerator = source.restoreEnumerator(context, staticCheckpoint)) {
       assertTrue(enumerator instanceof LazyFlinkSourceSplitEnumerator);
-      assertFalse(enumerator instanceof FlinkSourceSplitEnumerator);
+
+      Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>> restoredState =
+          enumerator.snapshotState(1L);
+      int restoredSplitCount = restoredState.values().stream().mapToInt(List::size).sum();
+      assertEquals(4, restoredSplitCount);
     }
   }
 
@@ -359,52 +446,58 @@ public class FlinkSourceSplitEnumeratorTest {
           FlinkSourceSplit<KV<Integer, Integer>>,
           Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>>>
       createBoundedEnumerator(long estimatedSizeBytes) throws Exception {
-    final int numSplits = 10;
-    TestBoundedCountingSource testSource =
-        new TestBoundedCountingSource(numSplits, Math.toIntExact(estimatedSizeBytes));
-    FlinkSource<KV<Integer, Integer>, ?> source =
-        FlinkSource.bounded(
-            "test-bounded-source",
-            testSource,
-            new SerializablePipelineOptions(FlinkPipelineOptions.defaults()),
-            numSplits);
-    TestingSplitEnumeratorContext<FlinkSourceSplit<KV<Integer, Integer>>> context =
-        new TestingSplitEnumeratorContext<>(SOURCE_PARALLELISM);
-    return source.createEnumerator(context);
+    return createBoundedEnumerator(estimatedSizeBytes, FlinkSourceSplitAssignmentPreference.AUTO);
   }
 
   private SplitEnumerator<
           FlinkSourceSplit<KV<Integer, Integer>>,
           Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>>>
       createBoundedEnumerator(
-          long estimatedSizeBytes, SplitAssignmentPreference splitAssignmentPreference)
+          long estimatedSizeBytes, FlinkSourceSplitAssignmentPreference splitAssignmentPreference)
           throws Exception {
-    final int numSplits = 10;
-    TestBoundedCountingSource testSource =
-        new PreferredTestBoundedCountingSource(
-            numSplits, Math.toIntExact(estimatedSizeBytes), splitAssignmentPreference);
     FlinkSource<KV<Integer, Integer>, ?> source =
-        FlinkSource.bounded(
-            "test-bounded-source",
-            testSource,
-            new SerializablePipelineOptions(FlinkPipelineOptions.defaults()),
-            numSplits);
+        createBoundedSource(estimatedSizeBytes, splitAssignmentPreference);
     TestingSplitEnumeratorContext<FlinkSourceSplit<KV<Integer, Integer>>> context =
         new TestingSplitEnumeratorContext<>(SOURCE_PARALLELISM);
     return source.createEnumerator(context);
   }
 
-  private static final class PreferredTestBoundedCountingSource extends TestBoundedCountingSource {
-    private final SplitAssignmentPreference splitAssignmentPreference;
+  private FlinkSource<KV<Integer, Integer>, ?> createBoundedSource(
+      long estimatedSizeBytes, FlinkSourceSplitAssignmentPreference splitAssignmentPreference) {
+    TestBoundedCountingSource testSource =
+        new PreferredTestBoundedCountingSource(
+            BOUNDED_SOURCE_SPLITS, Math.toIntExact(estimatedSizeBytes), splitAssignmentPreference);
+    return FlinkSource.bounded(
+        "test-bounded-source",
+        testSource,
+        new SerializablePipelineOptions(FlinkPipelineOptions.defaults()),
+        BOUNDED_SOURCE_SPLITS);
+  }
+
+  private List<FlinkSourceSplit<KV<Integer, Integer>>> createSplits(int... splitIndexes) {
+    List<FlinkSourceSplit<KV<Integer, Integer>>> splits = new ArrayList<>(splitIndexes.length);
+    for (int splitIndex : splitIndexes) {
+      splits.add(
+          new FlinkSourceSplit<>(
+              splitIndex, new TestBoundedCountingSource(BOUNDED_SOURCE_SPLITS, 1)));
+    }
+    return splits;
+  }
+
+  private static final class PreferredTestBoundedCountingSource extends TestBoundedCountingSource
+      implements FlinkSourceSplitAssignmentProvider {
+    private final FlinkSourceSplitAssignmentPreference splitAssignmentPreference;
 
     private PreferredTestBoundedCountingSource(
-        int shardNum, int totalNumRecords, SplitAssignmentPreference splitAssignmentPreference) {
+        int shardNum,
+        int totalNumRecords,
+        FlinkSourceSplitAssignmentPreference splitAssignmentPreference) {
       super(shardNum, totalNumRecords);
       this.splitAssignmentPreference = splitAssignmentPreference;
     }
 
     @Override
-    public SplitAssignmentPreference getSplitAssignmentPreference() {
+    public FlinkSourceSplitAssignmentPreference getFlinkSourceSplitAssignmentPreference() {
       return splitAssignmentPreference;
     }
   }

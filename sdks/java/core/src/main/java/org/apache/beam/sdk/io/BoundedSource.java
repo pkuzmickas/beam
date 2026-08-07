@@ -50,18 +50,6 @@ import org.joda.time.Instant;
  * @param <T> Type of records read by the source.
  */
 public abstract class BoundedSource<T> extends Source<T> {
-  /** Preferred strategy for assigning this source's initial splits to parallel readers. */
-  public enum SplitAssignmentPreference {
-    /** Let the runner choose an assignment strategy from the source and execution context. */
-    AUTO,
-
-    /** Assign splits when readers request work, allowing idle readers to help slower readers. */
-    LAZY,
-
-    /** Assign the complete split list before reading begins. */
-    STATIC
-  }
-
   /** Splits the source into bundles of approximately {@code desiredBundleSizeBytes}. */
   public abstract List<? extends BoundedSource<T>> split(
       long desiredBundleSizeBytes, PipelineOptions options) throws Exception;
@@ -74,19 +62,6 @@ public abstract class BoundedSource<T> extends Source<T> {
    * <p>If there is no way to estimate the size of the source implementations MAY return 0L.
    */
   public abstract long getEstimatedSizeBytes(PipelineOptions options) throws Exception;
-
-  /**
-   * Returns this source's preferred split-assignment strategy.
-   *
-   * <p>Sources should prefer {@link SplitAssignmentPreference#LAZY} when a split contains the
-   * expensive work and readers benefit from dynamic work stealing. Sources that emit cheap work
-   * descriptors for an expensive downstream operator may prefer {@link
-   * SplitAssignmentPreference#STATIC} to prevent early readers from concentrating that downstream
-   * work. The default is {@link SplitAssignmentPreference#AUTO}, which lets the runner decide.
-   */
-  public SplitAssignmentPreference getSplitAssignmentPreference() {
-    return SplitAssignmentPreference.AUTO;
-  }
 
   /** Returns a new {@link BoundedReader} that reads from this source. */
   public abstract BoundedReader<T> createReader(PipelineOptions options) throws IOException;

@@ -223,13 +223,6 @@ public abstract class FileBasedSource<T> extends OffsetBasedSource<T> {
   protected abstract FileBasedReader<T> createSingleFileReader(PipelineOptions options);
 
   @Override
-  public SplitAssignmentPreference getSplitAssignmentPreference() {
-    // File splits contain the actual I/O and decoding work. Lazy assignment lets readers that
-    // finish inexpensive splits take work from readers processing more expensive splits.
-    return SplitAssignmentPreference.LAZY;
-  }
-
-  @Override
   public final long getEstimatedSizeBytes(PipelineOptions options) throws IOException {
     // This implementation of method getEstimatedSizeBytes is provided to simplify subclasses. Here
     // we perform the size estimation of files and file patterns using the interface provided by
