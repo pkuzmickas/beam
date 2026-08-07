@@ -18,6 +18,7 @@
 package org.apache.beam.runners.flink.translation.wrappers.streaming.io.source;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -25,16 +26,57 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import org.apache.beam.runners.core.construction.SerializablePipelineOptions;
 import org.apache.beam.runners.flink.FlinkPipelineOptions;
 import org.apache.beam.runners.flink.translation.wrappers.streaming.io.TestBoundedCountingSource;
 import org.apache.beam.runners.flink.translation.wrappers.streaming.io.TestCountingSource;
+import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.io.FileBasedSource;
+import org.apache.beam.sdk.io.FileBasedSource.FileBasedReader;
+import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.Source;
+import org.apache.beam.sdk.io.fs.MatchResult.Metadata;
+import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.values.KV;
+import org.apache.flink.api.connector.source.SplitEnumerator;
 import org.apache.flink.connector.testutils.source.reader.TestingSplitEnumeratorContext;
 import org.junit.Test;
 
 /** Unit tests for {@link FlinkSourceSplitEnumerator}. */
 public class FlinkSourceSplitEnumeratorTest {
+  private static final long MEBIBYTE = 1024L * 1024L;
+
+  @Test
+  public void testBoundedSourceUsesLazyAssignmentByDefault() throws Exception {
+    FlinkPipelineOptions options = FlinkPipelineOptions.defaults();
+
+    try (SplitEnumerator<
+            FlinkSourceSplit<KV<Integer, Integer>>,
+            Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>>>
+        enumerator = createBoundedEnumerator(options)) {
+      // The new behavior must be opt-in. Existing Beam pipelines retain lazy work stealing unless
+      // they explicitly identify the cheap-descriptor/downstream-heavy execution shape.
+      assertTrue(enumerator instanceof LazyFlinkSourceSplitEnumerator);
+      assertFalse(enumerator instanceof FlinkSourceSplitEnumerator);
+    }
+  }
+
+  @Test
+  public void testBoundedSourceCanUseStaticRoundRobinAssignment() throws Exception {
+    FlinkPipelineOptions options = FlinkPipelineOptions.defaults();
+    options.setUseStaticSourceSplitAssignment(true);
+
+    try (SplitEnumerator<
+            FlinkSourceSplit<KV<Integer, Integer>>,
+            Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>>>
+        enumerator = createBoundedEnumerator(options)) {
+      // The static enumerator partitions the full split list by subtask index. The existing
+      // bounded-source assignment test below verifies that every reader receives an equal share.
+      assertTrue(enumerator instanceof FlinkSourceSplitEnumerator);
+      assertFalse(enumerator instanceof LazyFlinkSourceSplitEnumerator);
+    }
+  }
 
   @Test
   public void testAssignSplitsWithBoundedSource() throws IOException {
@@ -77,6 +119,76 @@ public class FlinkSourceSplitEnumeratorTest {
                         }
                       });
             });
+  }
+
+  @Test
+  public void testSignalsNoMoreSplitsToEarlyReaderWithoutAssignment() throws IOException {
+    final int numSubtasks = 2;
+    final int numSplits = 1;
+    TestingSplitEnumeratorContext<FlinkSourceSplit<KV<Integer, Integer>>> testContext =
+        new TestingSplitEnumeratorContext<>(numSubtasks);
+    TestBoundedCountingSource testSource = new TestBoundedCountingSource(numSplits, numSplits);
+
+    try (FlinkSourceSplitEnumerator<KV<Integer, Integer>> splitEnumerator =
+        new FlinkSourceSplitEnumerator<>(
+            testContext, testSource, FlinkPipelineOptions.defaults(), numSplits)) {
+      splitEnumerator.start();
+
+      // Register both readers before the asynchronous split operation completes. Reader 1 will
+      // not receive a split, but it must still receive NoMoreSplits after initialization. Without
+      // that signal a bounded source remains active forever and prevents the batch job finishing.
+      for (int subtaskId = 0; subtaskId < numSubtasks; subtaskId++) {
+        testContext.registerReader(subtaskId, String.valueOf(subtaskId));
+        splitEnumerator.addReader(subtaskId);
+      }
+      testContext.getExecutorService().triggerAll();
+
+      assertEquals(numSubtasks, testContext.getSplitAssignments().size());
+      assertEquals(1, testContext.getSplitAssignments().get(0).getAssignedSplits().size());
+      assertEquals(0, testContext.getSplitAssignments().get(1).getAssignedSplits().size());
+      assertTrue(testContext.getSplitAssignments().get(0).hasReceivedNoMoreSplitsSignal());
+      assertTrue(testContext.getSplitAssignments().get(1).hasReceivedNoMoreSplitsSignal());
+    }
+  }
+
+  @Test
+  public void testStaticAssignmentRespectsFileInputSplitMaxSize() throws IOException {
+    final int numSubtasks = 2;
+    final int requestedSplits = 2;
+    final long fileSize = 100L * MEBIBYTE;
+    final long maxSplitSizeMb = 10L;
+    final int expectedSplits = 10;
+    FlinkPipelineOptions options = FlinkPipelineOptions.defaults();
+    options.setFileInputSplitMaxSizeMB(maxSplitSizeMb);
+    TestingSplitEnumeratorContext<FlinkSourceSplit<String>> testContext =
+        new TestingSplitEnumeratorContext<>(numSubtasks);
+    TestFileBasedSource testSource = TestFileBasedSource.create(fileSize);
+
+    try (FlinkSourceSplitEnumerator<String> splitEnumerator =
+        new FlinkSourceSplitEnumerator<>(testContext, testSource, options, requestedSplits)) {
+      splitEnumerator.start();
+      for (int subtaskId = 0; subtaskId < numSubtasks; subtaskId++) {
+        testContext.registerReader(subtaskId, String.valueOf(subtaskId));
+        splitEnumerator.addReader(subtaskId);
+      }
+      testContext.getExecutorService().triggerAll();
+
+      // Without the cap, the 100 MiB source and two requested splits would produce two 50 MiB
+      // splits. The 10 MiB cap must instead produce ten splits while retaining round-robin balance.
+      int actualSplits =
+          testContext.getSplitAssignments().values().stream()
+              .mapToInt(state -> state.getAssignedSplits().size())
+              .sum();
+      assertEquals(expectedSplits, actualSplits);
+      testContext
+          .getSplitAssignments()
+          .values()
+          .forEach(
+              state -> {
+                assertEquals(expectedSplits / numSubtasks, state.getAssignedSplits().size());
+                assertTrue(state.hasReceivedNoMoreSplitsSignal());
+              });
+    }
   }
 
   @Test
@@ -191,6 +303,52 @@ public class FlinkSourceSplitEnumeratorTest {
       context.registerReader(1, "1");
       // Add another reader after splitting the beam source.
       splitEnumerator.addReader(1);
+    }
+  }
+
+  private SplitEnumerator<
+          FlinkSourceSplit<KV<Integer, Integer>>,
+          Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>>>
+      createBoundedEnumerator(FlinkPipelineOptions options) throws Exception {
+    final int numSplits = 10;
+    TestBoundedCountingSource testSource = new TestBoundedCountingSource(numSplits, numSplits);
+    FlinkSource<KV<Integer, Integer>, ?> source =
+        FlinkSource.bounded(
+            "test-bounded-source", testSource, new SerializablePipelineOptions(options), numSplits);
+    TestingSplitEnumeratorContext<FlinkSourceSplit<KV<Integer, Integer>>> context =
+        new TestingSplitEnumeratorContext<>(2);
+    return source.createEnumerator(context);
+  }
+
+  private static final class TestFileBasedSource extends FileBasedSource<String> {
+    private TestFileBasedSource(Metadata metadata, long startOffset, long endOffset) {
+      super(metadata, 1L, startOffset, endOffset);
+    }
+
+    private static TestFileBasedSource create(long sizeBytes) {
+      Metadata metadata =
+          Metadata.builder()
+              .setResourceId(FileSystems.matchNewResource("static-split-size-test", false))
+              .setSizeBytes(sizeBytes)
+              .setIsReadSeekEfficient(true)
+              .build();
+      return new TestFileBasedSource(metadata, 0L, sizeBytes);
+    }
+
+    @Override
+    public Coder<String> getOutputCoder() {
+      return StringUtf8Coder.of();
+    }
+
+    @Override
+    protected FileBasedSource<String> createForSubrangeOfFile(
+        Metadata metadata, long start, long end) {
+      return new TestFileBasedSource(metadata, start, end);
+    }
+
+    @Override
+    protected FileBasedReader<String> createSingleFileReader(PipelineOptions options) {
+      throw new UnsupportedOperationException("This source is only used to test split sizing");
     }
   }
 }

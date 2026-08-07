@@ -113,6 +113,30 @@ public abstract class FlinkSource<T, OutputT>
           throws Exception {
 
     if (boundedness == Boundedness.BOUNDED) {
+      FlinkPipelineOptions flinkOptions =
+          serializablePipelineOptions.get().as(FlinkPipelineOptions.class);
+
+      // The normal bounded-source enumerator is deliberately pull-based: a reader receives its
+      // next split only after it finishes the current one. That is useful work stealing when the
+      // source split itself represents the expensive operation.
+      //
+      // Some Beam transforms instead use a bounded source to emit lightweight work descriptors.
+      // The expensive operation then runs in the next Flink operator. A fast source reader can emit
+      // many descriptors before its peers start, and a RESCALE/FORWARD-style edge preserves that
+      // sparse allocation. Static assignment bounds every reader to its round-robin share before
+      // any descriptors are emitted, so the downstream pointwise edge receives balanced work.
+      //
+      // Keep this opt-in. Static assignment removes work stealing and can hurt ordinary bounded
+      // sources whose splits contain uneven amounts of real work.
+      if (Boolean.TRUE.equals(flinkOptions.getUseStaticSourceSplitAssignment())) {
+        return new FlinkSourceSplitEnumerator<>(
+            enumContext,
+            beamSource,
+            serializablePipelineOptions.get(),
+            numSplits,
+            splitInitialized);
+      }
+
       return new LazyFlinkSourceSplitEnumerator<>(
           enumContext, beamSource, serializablePipelineOptions.get(), numSplits, splitInitialized);
     } else {

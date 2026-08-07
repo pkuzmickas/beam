@@ -373,6 +373,33 @@ public interface FlinkPipelineOptions
 
   void setEnableStableInputDrain(Boolean enableStableInputDrain);
 
+  /**
+   * Controls how Flink assigns a bounded Beam source's initial splits to source readers.
+   *
+   * <p>The default {@code false} keeps Beam's lazy enumerator. That is normally the best general
+   * behavior because an idle reader can request another split and therefore steal work from busy
+   * readers.
+   *
+   * <p>Some sources, including SMB bucket descriptors, are very cheap to read but trigger expensive
+   * work in the next fused operator. Lazy assignment balances only the cheap descriptor read. A few
+   * readers can consequently request most descriptors before the downstream work applies
+   * backpressure, concentrating the expensive work on those readers.
+   *
+   * <p>Enable this option for that execution shape. Beam will partition the complete bounded split
+   * list across the configured source parallelism before processing starts. Each reader receives a
+   * fixed, near-equal share and processes its assigned splits sequentially. This intentionally
+   * gives up lazy work stealing, so it should remain disabled for sources whose splits have
+   * materially different processing costs.
+   */
+  @Description(
+      "Assign bounded source splits statically and round-robin. This prevents cheap source "
+          + "descriptors from concentrating expensive downstream work, but disables lazy work "
+          + "stealing between source readers.")
+  @Default.Boolean(false)
+  Boolean getUseStaticSourceSplitAssignment();
+
+  void setUseStaticSourceSplitAssignment(Boolean useStaticSourceSplitAssignment);
+
   @Description(
       "Set a slot sharing group for all bounded sources. This is required when using Datastream to have the same scheduling behaviour as the Dataset API.")
   @Default.Boolean(true)
