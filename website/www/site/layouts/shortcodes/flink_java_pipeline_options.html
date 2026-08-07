@@ -212,9 +212,4 @@ Should be called before running the tests.
   <td>If set, Unaligned checkpoints contain in-flight data (i.e., data stored in buffers) as part of the checkpoint state, allowing checkpoint barriers to overtake these buffers. Thus, the checkpoint duration becomes independent of the current throughput as checkpoint barriers are effectively not embedded into the stream of data anymore</td>
   <td>Default: <code>false</code></td>
 </tr>
-<tr>
-  <td><code>useStaticSourceSplitAssignment</code></td>
-  <td>Assign bounded source splits statically and round-robin. This prevents cheap source descriptors from concentrating expensive downstream work, but disables lazy work stealing between source readers.</td>
-  <td>Default: <code>false</code></td>
-</tr>
 </table>

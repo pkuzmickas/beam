@@ -185,7 +185,7 @@ public class FlinkSourceSplitEnumerator<T>
     }
 
     // Static assignment changes only which reader owns each split. Preserve the same file split
-    // sizing rule as the lazy enumerator so enabling the option cannot silently coarsen a file
+    // sizing rule as the lazy enumerator so automatic selection cannot silently coarsen a file
     // source and reintroduce the file-size skew this runner option was designed to avoid.
     if (beamSource instanceof FileBasedSource && maxSplitSizeMb > 0) {
       return Math.min(defaultSplitSize, maxSplitSizeMb * 1024 * 1024);

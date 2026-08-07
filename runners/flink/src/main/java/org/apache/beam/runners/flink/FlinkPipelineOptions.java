@@ -380,32 +380,6 @@ public interface FlinkPipelineOptions
 
   void setFileInputSplitMaxSizeMB(Long fileInputSplitMaxSizeMB);
 
-  /**
-   * Assign bounded source splits to readers statically and round-robin instead of handing them out
-   * on demand.
-   *
-   * <p>The default lazy assignment works well when each source split contains the expensive work: a
-   * reader that finishes early asks for another split and naturally helps a slower reader. It can
-   * create severe downstream skew, however, when a source split is only a cheap descriptor and the
-   * expensive work happens in the following operator. Fast readers can drain many descriptors
-   * before the rest of the source subtasks have started, and a pointwise downstream edge preserves
-   * that imbalance.
-   *
-   * <p>Enable this option for that execution shape. Beam will partition the complete bounded split
-   * list across the configured source parallelism before processing starts. Each reader receives a
-   * fixed, near-equal share and processes its assigned splits sequentially. This intentionally
-   * gives up lazy work stealing, so it should remain disabled for sources whose splits have
-   * materially different processing costs.
-   */
-  @Description(
-      "Assign bounded source splits statically and round-robin. This prevents cheap source "
-          + "descriptors from concentrating expensive downstream work, but disables lazy work "
-          + "stealing between source readers.")
-  @Default.Boolean(false)
-  Boolean getUseStaticSourceSplitAssignment();
-
-  void setUseStaticSourceSplitAssignment(Boolean useStaticSourceSplitAssignment);
-
   @Description(
       "Allow drain operation for flink pipelines that contain RequiresStableInput operator. Note that at time of draining,"
           + "the RequiresStableInput contract might be violated if there any processing related failures in the DoFn operator.")

@@ -29,12 +29,15 @@ import org.apache.beam.runners.flink.translation.wrappers.streaming.io.source.im
 import org.apache.beam.runners.flink.translation.wrappers.streaming.io.source.unbounded.FlinkUnboundedSource;
 import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.io.UnboundedSource;
+import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.flink.api.common.eventtime.Watermark;
 import org.apache.flink.api.connector.source.Boundedness;
 import org.apache.flink.api.connector.source.Source;
 import org.apache.flink.api.connector.source.SplitEnumerator;
 import org.apache.flink.api.connector.source.SplitEnumeratorContext;
 import org.apache.flink.core.io.SimpleVersionedSerializer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The base class for {@link FlinkBoundedSource} and {@link FlinkUnboundedSource}.
@@ -44,6 +47,9 @@ import org.apache.flink.core.io.SimpleVersionedSerializer;
  */
 public abstract class FlinkSource<T, OutputT>
     implements Source<OutputT, FlinkSourceSplit<T>, Map<Integer, List<FlinkSourceSplit<T>>>> {
+
+  static final long STATIC_ASSIGNMENT_MIN_BYTES_PER_READER = 128L * 1024L * 1024L;
+  private static final Logger LOG = LoggerFactory.getLogger(FlinkSource.class);
 
   protected final String stepName;
   protected final org.apache.beam.sdk.io.Source<T> beamSource;
@@ -113,9 +119,6 @@ public abstract class FlinkSource<T, OutputT>
           throws Exception {
 
     if (boundedness == Boundedness.BOUNDED) {
-      FlinkPipelineOptions flinkOptions =
-          serializablePipelineOptions.get().as(FlinkPipelineOptions.class);
-
       // The normal bounded-source enumerator is deliberately pull-based: a reader receives its
       // next split only after it finishes the current one. That is useful work stealing when the
       // source split itself represents the expensive operation.
@@ -126,19 +129,17 @@ public abstract class FlinkSource<T, OutputT>
       // sparse allocation. Static assignment bounds every reader to its round-robin share before
       // any descriptors are emitted, so the downstream pointwise edge receives balanced work.
       //
-      // Keep this opt-in. Static assignment removes work stealing and can hurt ordinary bounded
-      // sources whose splits contain uneven amounts of real work.
-      if (Boolean.TRUE.equals(flinkOptions.getUseStaticSourceSplitAssignment())) {
+      // Estimated bytes per requested reader provide a source-local signal, unlike a pipeline-wide
+      // option. Small sources retain work stealing. Large sources use static assignment so that a
+      // few fast readers cannot drain all descriptors before downstream backpressure arrives.
+      PipelineOptions pipelineOptions = serializablePipelineOptions.get();
+      if (shouldUseStaticSplitAssignment(pipelineOptions, enumContext.currentParallelism())) {
         return new FlinkSourceSplitEnumerator<>(
-            enumContext,
-            beamSource,
-            serializablePipelineOptions.get(),
-            numSplits,
-            splitInitialized);
+            enumContext, beamSource, pipelineOptions, numSplits, splitInitialized);
       }
 
       return new LazyFlinkSourceSplitEnumerator<>(
-          enumContext, beamSource, serializablePipelineOptions.get(), numSplits, splitInitialized);
+          enumContext, beamSource, pipelineOptions, numSplits, splitInitialized);
     } else {
       return new FlinkSourceSplitEnumerator<>(
           enumContext, beamSource, serializablePipelineOptions.get(), numSplits, splitInitialized);
@@ -171,6 +172,35 @@ public abstract class FlinkSource<T, OutputT>
 
   public int getNumSplits() {
     return numSplits;
+  }
+
+  private boolean shouldUseStaticSplitAssignment(
+      PipelineOptions pipelineOptions, int sourceParallelism) throws Exception {
+    if (sourceParallelism <= 0) {
+      LOG.warn(
+          "Using lazy split assignment for bounded source {} because the source parallelism is "
+              + "not positive: {}",
+          beamSource,
+          sourceParallelism);
+      return false;
+    }
+
+    BoundedSource<?> boundedSource = (BoundedSource<?>) beamSource;
+    long estimatedSizeBytes = boundedSource.getEstimatedSizeBytes(pipelineOptions);
+    long estimatedBytesPerReader = estimatedSizeBytes / sourceParallelism;
+    boolean useStaticAssignment = estimatedBytesPerReader >= STATIC_ASSIGNMENT_MIN_BYTES_PER_READER;
+
+    LOG.info(
+        "Using {} split assignment for bounded source {}: estimated size {} bytes, source "
+            + "parallelism {}, estimated bytes per reader {}, static assignment threshold {} "
+            + "bytes",
+        useStaticAssignment ? "static" : "lazy",
+        beamSource,
+        estimatedSizeBytes,
+        sourceParallelism,
+        estimatedBytesPerReader,
+        STATIC_ASSIGNMENT_MIN_BYTES_PER_READER);
+    return useStaticAssignment;
   }
 
   @FunctionalInterface

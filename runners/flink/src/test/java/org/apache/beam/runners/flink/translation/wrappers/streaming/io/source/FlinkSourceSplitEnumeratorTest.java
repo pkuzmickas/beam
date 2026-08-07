@@ -46,33 +46,33 @@ import org.junit.Test;
 /** Unit tests for {@link FlinkSourceSplitEnumerator}. */
 public class FlinkSourceSplitEnumeratorTest {
   private static final long MEBIBYTE = 1024L * 1024L;
+  private static final int SOURCE_PARALLELISM = 2;
 
   @Test
-  public void testBoundedSourceUsesLazyAssignmentByDefault() throws Exception {
-    FlinkPipelineOptions options = FlinkPipelineOptions.defaults();
-
+  public void testSmallBoundedSourceUsesLazyAssignment() throws Exception {
+    long estimatedSizeBytes =
+        SOURCE_PARALLELISM * FlinkSource.STATIC_ASSIGNMENT_MIN_BYTES_PER_READER - 1L;
     try (SplitEnumerator<
             FlinkSourceSplit<KV<Integer, Integer>>,
             Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>>>
-        enumerator = createBoundedEnumerator(options)) {
-      // The new behavior must be opt-in. Existing Beam pipelines retain lazy work stealing unless
-      // they explicitly identify the cheap-descriptor/downstream-heavy execution shape.
+        enumerator = createBoundedEnumerator(estimatedSizeBytes)) {
+      // Even one byte below the per-reader threshold retains work stealing because a fixed split
+      // allocation would make the job wait for the slowest reader without enough balancing value.
       assertTrue(enumerator instanceof LazyFlinkSourceSplitEnumerator);
       assertFalse(enumerator instanceof FlinkSourceSplitEnumerator);
     }
   }
 
   @Test
-  public void testBoundedSourceCanUseStaticRoundRobinAssignment() throws Exception {
-    FlinkPipelineOptions options = FlinkPipelineOptions.defaults();
-    options.setUseStaticSourceSplitAssignment(true);
-
+  public void testLargeBoundedSourceUsesStaticRoundRobinAssignment() throws Exception {
+    long estimatedSizeBytes =
+        SOURCE_PARALLELISM * FlinkSource.STATIC_ASSIGNMENT_MIN_BYTES_PER_READER;
     try (SplitEnumerator<
             FlinkSourceSplit<KV<Integer, Integer>>,
             Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>>>
-        enumerator = createBoundedEnumerator(options)) {
-      // The static enumerator partitions the full split list by subtask index. The existing
-      // bounded-source assignment test below verifies that every reader receives an equal share.
+        enumerator = createBoundedEnumerator(estimatedSizeBytes)) {
+      // Reaching the per-reader threshold selects static assignment. The bounded-source assignment
+      // test below verifies that the enumerator gives every reader an equal round-robin share.
       assertTrue(enumerator instanceof FlinkSourceSplitEnumerator);
       assertFalse(enumerator instanceof LazyFlinkSourceSplitEnumerator);
     }
@@ -309,14 +309,18 @@ public class FlinkSourceSplitEnumeratorTest {
   private SplitEnumerator<
           FlinkSourceSplit<KV<Integer, Integer>>,
           Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>>>
-      createBoundedEnumerator(FlinkPipelineOptions options) throws Exception {
+      createBoundedEnumerator(long estimatedSizeBytes) throws Exception {
     final int numSplits = 10;
-    TestBoundedCountingSource testSource = new TestBoundedCountingSource(numSplits, numSplits);
+    TestBoundedCountingSource testSource =
+        new TestBoundedCountingSource(numSplits, Math.toIntExact(estimatedSizeBytes));
     FlinkSource<KV<Integer, Integer>, ?> source =
         FlinkSource.bounded(
-            "test-bounded-source", testSource, new SerializablePipelineOptions(options), numSplits);
+            "test-bounded-source",
+            testSource,
+            new SerializablePipelineOptions(FlinkPipelineOptions.defaults()),
+            numSplits);
     TestingSplitEnumeratorContext<FlinkSourceSplit<KV<Integer, Integer>>> context =
-        new TestingSplitEnumeratorContext<>(2);
+        new TestingSplitEnumeratorContext<>(SOURCE_PARALLELISM);
     return source.createEnumerator(context);
   }
 
