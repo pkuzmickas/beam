@@ -21,11 +21,12 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import javax.annotation.Nullable;
+import org.apache.beam.runners.flink.FlinkPipelineOptions;
 import org.apache.beam.sdk.io.BoundedSource;
+import org.apache.beam.sdk.io.FileBasedSource;
 import org.apache.beam.sdk.io.Source;
 import org.apache.beam.sdk.io.UnboundedSource;
 import org.apache.beam.sdk.options.PipelineOptions;
@@ -82,7 +83,8 @@ public class FlinkSourceSplitEnumerator<T>
     this.splitsInitialized = splitsInitialized;
 
     LOG.info(
-        "Created new enumerator with parallelism {}, source {}, numSplits {}, initialized {}",
+        "Created static round-robin enumerator with parallelism {}, source {}, numSplits {}, "
+            + "initialized {}",
         context.currentParallelism(),
         beamSource,
         numSplits,
@@ -105,6 +107,11 @@ public class FlinkSourceSplitEnumerator<T>
             Map<Integer, List<FlinkSourceSplit<T>>> flinkSourceSplitsList = new HashMap<>();
             int i = 0;
             for (Source<T> beamSplitSource : beamSplitSourceList) {
+              // Assign from the complete split list instead of waiting for readers to request work.
+              // Modulo assignment guarantees that any two subtasks differ by at most one split.
+              // For example, 2,048 SMB bucket descriptors at parallelism 518 become either three
+              // or four descriptors per source subtask. Because the next operator is connected
+              // pointwise, this also bounds its expensive bucket-processing work to the same range.
               int targetSubtask = i % context.currentParallelism();
               List<FlinkSourceSplit<T>> splitsForTask =
                   flinkSourceSplitsList.computeIfAbsent(
@@ -143,14 +150,16 @@ public class FlinkSourceSplitEnumerator<T>
 
   @Override
   public void addReader(int subtaskId) {
+    sendPendingSplitsToSourceReader(subtaskId);
+  }
+
+  private void sendPendingSplitsToSourceReader(int subtaskId) {
     List<FlinkSourceSplit<T>> splitsForSubtask = pendingSplits.remove(subtaskId);
     if (splitsForSubtask != null) {
       assignSplitsAndLog(splitsForSubtask, subtaskId);
-    } else {
-      if (splitsInitialized) {
-        LOG.info("There is no split for subtask {}. Signaling no more splits.", subtaskId);
-        context.signalNoMoreSplits(subtaskId);
-      }
+    } else if (splitsInitialized) {
+      LOG.info("There is no split for subtask {}. Signaling no more splits.", subtaskId);
+      context.signalNoMoreSplits(subtaskId);
     }
   }
 
@@ -166,10 +175,28 @@ public class FlinkSourceSplitEnumerator<T>
   }
 
   // -------------- Private helper methods ----------------------
+  private long getDesiredSizeBytes(int requestedSplits, BoundedSource<T> boundedSource)
+      throws Exception {
+    long totalSize = boundedSource.getEstimatedSizeBytes(pipelineOptions);
+    long defaultSplitSize = totalSize / requestedSplits;
+    long maxSplitSizeMb = 0;
+    if (pipelineOptions != null) {
+      maxSplitSizeMb = pipelineOptions.as(FlinkPipelineOptions.class).getFileInputSplitMaxSizeMB();
+    }
+
+    // Static assignment changes only which reader owns each split. Preserve the same file split
+    // sizing rule as the lazy enumerator so enabling the option cannot silently coarsen a file
+    // source and reintroduce the file-size skew this runner option was designed to avoid.
+    if (beamSource instanceof FileBasedSource && maxSplitSizeMb > 0) {
+      return Math.min(defaultSplitSize, maxSplitSizeMb * 1024 * 1024);
+    }
+    return defaultSplitSize;
+  }
+
   private List<? extends Source<T>> splitBeamSource() throws Exception {
     if (beamSource instanceof BoundedSource) {
       BoundedSource<T> boundedSource = (BoundedSource<T>) beamSource;
-      long desiredSizeBytes = boundedSource.getEstimatedSizeBytes(pipelineOptions) / numSplits;
+      long desiredSizeBytes = getDesiredSizeBytes(numSplits, boundedSource);
       return boundedSource.split(desiredSizeBytes, pipelineOptions);
     } else if (beamSource instanceof UnboundedSource) {
       List<? extends UnboundedSource<T, ?>> splits =
@@ -182,16 +209,17 @@ public class FlinkSourceSplitEnumerator<T>
   }
 
   private void sendPendingSplitsToSourceReaders() {
-    Iterator<Map.Entry<Integer, List<FlinkSourceSplit<T>>>> splitIter =
-        pendingSplits.entrySet().iterator();
-    while (splitIter.hasNext()) {
-      Map.Entry<Integer, List<FlinkSourceSplit<T>>> entry = splitIter.next();
-      int readerIndex = entry.getKey();
-      int targetSubtask = readerIndex % context.currentParallelism();
-      if (context.registeredReaders().containsKey(targetSubtask)) {
-        assignSplitsAndLog(entry.getValue(), targetSubtask);
-        splitIter.remove();
-      }
+    // A reader can register while splitBeamSource() is still running. addReader() cannot decide
+    // whether that reader owns no work until initialization finishes, so it deliberately does
+    // nothing while splitsInitialized is false.
+    //
+    // Visit registered readers rather than pending-split entries after initialization. A reader
+    // may be absent from pendingSplits when the source produced fewer splits than the configured
+    // parallelism. That reader still needs signalNoMoreSplits or a bounded job will wait forever.
+    // Readers that register after this callback are handled by addReader() with splitsInitialized
+    // already set to true.
+    for (int subtaskId : context.registeredReaders().keySet()) {
+      sendPendingSplitsToSourceReader(subtaskId);
     }
   }
 
