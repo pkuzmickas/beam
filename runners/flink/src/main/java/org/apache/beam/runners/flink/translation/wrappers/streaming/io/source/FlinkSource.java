@@ -28,6 +28,7 @@ import org.apache.beam.runners.flink.translation.wrappers.streaming.io.source.bo
 import org.apache.beam.runners.flink.translation.wrappers.streaming.io.source.impulse.BeamImpulseSource;
 import org.apache.beam.runners.flink.translation.wrappers.streaming.io.source.unbounded.FlinkUnboundedSource;
 import org.apache.beam.sdk.io.BoundedSource;
+import org.apache.beam.sdk.io.BoundedSource.SplitAssignmentPreference;
 import org.apache.beam.sdk.io.UnboundedSource;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.flink.api.common.eventtime.Watermark;
@@ -129,9 +130,8 @@ public abstract class FlinkSource<T, OutputT>
       // sparse allocation. Static assignment bounds every reader to its round-robin share before
       // any descriptors are emitted, so the downstream pointwise edge receives balanced work.
       //
-      // Estimated bytes per requested reader provide a source-local signal, unlike a pipeline-wide
-      // option. Small sources retain work stealing. Large sources use static assignment so that a
-      // few fast readers cannot drain all descriptors before downstream backpressure arrives.
+      // Prefer an explicit source-level signal. For sources that leave the choice to the runner,
+      // estimated bytes per reader provide a fallback unlike a pipeline-wide option.
       PipelineOptions pipelineOptions = serializablePipelineOptions.get();
       if (shouldUseStaticSplitAssignment(pipelineOptions, enumContext.currentParallelism())) {
         return new FlinkSourceSplitEnumerator<>(
@@ -186,12 +186,24 @@ public abstract class FlinkSource<T, OutputT>
     }
 
     BoundedSource<?> boundedSource = (BoundedSource<?>) beamSource;
+    SplitAssignmentPreference preference = boundedSource.getSplitAssignmentPreference();
+    if (preference != SplitAssignmentPreference.AUTO) {
+      boolean useStaticAssignment = preference == SplitAssignmentPreference.STATIC;
+      LOG.info(
+          "Using {} split assignment for bounded source {} from its explicit {} preference",
+          useStaticAssignment ? "static" : "lazy",
+          beamSource,
+          preference);
+      return useStaticAssignment;
+    }
+
     long estimatedSizeBytes = boundedSource.getEstimatedSizeBytes(pipelineOptions);
     long estimatedBytesPerReader = estimatedSizeBytes / sourceParallelism;
     boolean useStaticAssignment = estimatedBytesPerReader >= STATIC_ASSIGNMENT_MIN_BYTES_PER_READER;
 
     LOG.info(
-        "Using {} split assignment for bounded source {}: estimated size {} bytes, source "
+        "Using {} split assignment for bounded source {} from the automatic size fallback: "
+            + "estimated size {} bytes, source "
             + "parallelism {}, estimated bytes per reader {}, static assignment threshold {} "
             + "bytes",
         useStaticAssignment ? "static" : "lazy",

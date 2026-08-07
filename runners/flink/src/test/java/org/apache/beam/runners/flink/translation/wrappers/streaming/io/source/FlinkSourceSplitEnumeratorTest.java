@@ -32,6 +32,7 @@ import org.apache.beam.runners.flink.translation.wrappers.streaming.io.TestBound
 import org.apache.beam.runners.flink.translation.wrappers.streaming.io.TestCountingSource;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.io.BoundedSource.SplitAssignmentPreference;
 import org.apache.beam.sdk.io.FileBasedSource;
 import org.apache.beam.sdk.io.FileBasedSource.FileBasedReader;
 import org.apache.beam.sdk.io.FileSystems;
@@ -75,6 +76,54 @@ public class FlinkSourceSplitEnumeratorTest {
       // test below verifies that the enumerator gives every reader an equal round-robin share.
       assertTrue(enumerator instanceof FlinkSourceSplitEnumerator);
       assertFalse(enumerator instanceof LazyFlinkSourceSplitEnumerator);
+    }
+  }
+
+  @Test
+  public void testLazyPreferenceOverridesLargeSourceSize() throws Exception {
+    long estimatedSizeBytes =
+        SOURCE_PARALLELISM * FlinkSource.STATIC_ASSIGNMENT_MIN_BYTES_PER_READER;
+    try (SplitEnumerator<
+            FlinkSourceSplit<KV<Integer, Integer>>,
+            Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>>>
+        enumerator = createBoundedEnumerator(estimatedSizeBytes, SplitAssignmentPreference.LAZY)) {
+      assertTrue(enumerator instanceof LazyFlinkSourceSplitEnumerator);
+      assertFalse(enumerator instanceof FlinkSourceSplitEnumerator);
+    }
+  }
+
+  @Test
+  public void testStaticPreferenceOverridesSmallSourceSize() throws Exception {
+    long estimatedSizeBytes =
+        SOURCE_PARALLELISM * FlinkSource.STATIC_ASSIGNMENT_MIN_BYTES_PER_READER - 1L;
+    try (SplitEnumerator<
+            FlinkSourceSplit<KV<Integer, Integer>>,
+            Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>>>
+        enumerator =
+            createBoundedEnumerator(estimatedSizeBytes, SplitAssignmentPreference.STATIC)) {
+      assertTrue(enumerator instanceof FlinkSourceSplitEnumerator);
+      assertFalse(enumerator instanceof LazyFlinkSourceSplitEnumerator);
+    }
+  }
+
+  @Test
+  public void testLargeFileBasedSourceUsesLazyAssignment() throws Exception {
+    long estimatedSizeBytes =
+        SOURCE_PARALLELISM * FlinkSource.STATIC_ASSIGNMENT_MIN_BYTES_PER_READER;
+    TestFileBasedSource testSource = TestFileBasedSource.create(estimatedSizeBytes);
+    FlinkSource<String, ?> source =
+        FlinkSource.bounded(
+            "test-file-based-source",
+            testSource,
+            new SerializablePipelineOptions(FlinkPipelineOptions.defaults()),
+            SOURCE_PARALLELISM);
+    TestingSplitEnumeratorContext<FlinkSourceSplit<String>> context =
+        new TestingSplitEnumeratorContext<>(SOURCE_PARALLELISM);
+
+    try (SplitEnumerator<FlinkSourceSplit<String>, Map<Integer, List<FlinkSourceSplit<String>>>>
+        enumerator = source.createEnumerator(context)) {
+      assertTrue(enumerator instanceof LazyFlinkSourceSplitEnumerator);
+      assertFalse(enumerator instanceof FlinkSourceSplitEnumerator);
     }
   }
 
@@ -322,6 +371,42 @@ public class FlinkSourceSplitEnumeratorTest {
     TestingSplitEnumeratorContext<FlinkSourceSplit<KV<Integer, Integer>>> context =
         new TestingSplitEnumeratorContext<>(SOURCE_PARALLELISM);
     return source.createEnumerator(context);
+  }
+
+  private SplitEnumerator<
+          FlinkSourceSplit<KV<Integer, Integer>>,
+          Map<Integer, List<FlinkSourceSplit<KV<Integer, Integer>>>>>
+      createBoundedEnumerator(
+          long estimatedSizeBytes, SplitAssignmentPreference splitAssignmentPreference)
+          throws Exception {
+    final int numSplits = 10;
+    TestBoundedCountingSource testSource =
+        new PreferredTestBoundedCountingSource(
+            numSplits, Math.toIntExact(estimatedSizeBytes), splitAssignmentPreference);
+    FlinkSource<KV<Integer, Integer>, ?> source =
+        FlinkSource.bounded(
+            "test-bounded-source",
+            testSource,
+            new SerializablePipelineOptions(FlinkPipelineOptions.defaults()),
+            numSplits);
+    TestingSplitEnumeratorContext<FlinkSourceSplit<KV<Integer, Integer>>> context =
+        new TestingSplitEnumeratorContext<>(SOURCE_PARALLELISM);
+    return source.createEnumerator(context);
+  }
+
+  private static final class PreferredTestBoundedCountingSource extends TestBoundedCountingSource {
+    private final SplitAssignmentPreference splitAssignmentPreference;
+
+    private PreferredTestBoundedCountingSource(
+        int shardNum, int totalNumRecords, SplitAssignmentPreference splitAssignmentPreference) {
+      super(shardNum, totalNumRecords);
+      this.splitAssignmentPreference = splitAssignmentPreference;
+    }
+
+    @Override
+    public SplitAssignmentPreference getSplitAssignmentPreference() {
+      return splitAssignmentPreference;
+    }
   }
 
   private static final class TestFileBasedSource extends FileBasedSource<String> {
