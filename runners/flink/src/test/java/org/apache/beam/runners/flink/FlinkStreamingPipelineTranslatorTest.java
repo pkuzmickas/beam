@@ -18,7 +18,11 @@
 package org.apache.beam.runners.flink;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.Assert.assertNull;
 
@@ -27,6 +31,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Collectors;
 import org.apache.beam.runners.flink.FlinkStreamingPipelineTranslator.FlinkAutoBalancedShardKeyShardingFunction;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.coders.KvCoder;
@@ -48,9 +53,16 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.ShardedKey;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.apache.flink.api.common.RuntimeExecutionMode;
 import org.apache.flink.runtime.jobgraph.JobGraph;
+import org.apache.flink.runtime.jobgraph.JobType;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.graph.StreamConfig.InputRequirement;
+import org.apache.flink.streaming.api.graph.StreamEdge;
+import org.apache.flink.streaming.api.graph.StreamGraph;
+import org.apache.flink.streaming.api.graph.StreamNode;
+import org.apache.flink.streaming.runtime.partitioner.KeyGroupStreamPartitioner;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -59,6 +71,76 @@ import org.junit.Test;
 // released (2.11.0)
 @SuppressWarnings("unused")
 public class FlinkStreamingPipelineTranslatorTest {
+
+  private static final String TEST_GBK = "TestGBK";
+
+  @Test
+  public void testBatchGroupByKeyPreAggregationIsEnabledByDefault() {
+    StreamGraph streamGraph = groupByKeyStreamGraph(false, false);
+    List<String> operatorNames = operatorNames(streamGraph);
+
+    assertThat(operatorNames.toString(), containsString("Combine: " + TEST_GBK));
+    assertThat(streamGraph.getJobType(), is(JobType.BATCH));
+  }
+
+  @Test
+  public void testBatchGroupByKeyPreAggregationCanBeDisabled() {
+    StreamGraph streamGraph = groupByKeyStreamGraph(true, false);
+    List<String> operatorNames = operatorNames(streamGraph);
+
+    assertThat(operatorNames.toString(), not(containsString("Combine: " + TEST_GBK)));
+    assertThat(streamGraph.getJobType(), is(JobType.BATCH));
+
+    StreamNode groupByKey =
+        streamGraph.getStreamNodes().stream()
+            .filter(node -> TEST_GBK.equals(node.getOperatorName()))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("Missing final GroupByKey operator"));
+    assertThat(groupByKey.getInEdges().size(), is(1));
+    StreamEdge keyedInput = groupByKey.getInEdges().get(0);
+    assertThat(keyedInput.getPartitioner(), instanceOf(KeyGroupStreamPartitioner.class));
+    assertThat(groupByKey.getInputRequirements().get(0), is(InputRequirement.SORTED));
+  }
+
+  @Test
+  public void testBatchGroupByKeyOptionDoesNotChangeStreamingTranslation() {
+    StreamGraph optionOff = groupByKeyStreamGraph(false, true);
+    StreamGraph optionOn = groupByKeyStreamGraph(true, true);
+
+    assertThat(optionOff.getJobType(), is(JobType.STREAMING));
+    assertThat(optionOn.getJobType(), is(JobType.STREAMING));
+    assertThat(operatorNames(optionOn), is(operatorNames(optionOff)));
+  }
+
+  private static StreamGraph groupByKeyStreamGraph(
+      boolean disablePreAggregation, boolean streaming) {
+    FlinkPipelineOptions options = PipelineOptionsFactory.as(FlinkPipelineOptions.class);
+    options.setRunner(FlinkRunner.class);
+    options.setStreaming(streaming);
+    options.setDisableBatchGroupByKeyPreAggregation(disablePreAggregation);
+
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setRuntimeMode(streaming ? RuntimeExecutionMode.STREAMING : RuntimeExecutionMode.BATCH);
+    FlinkStreamingPipelineTranslator translator =
+        new FlinkStreamingPipelineTranslator(env, options, streaming);
+
+    Pipeline pipeline = Pipeline.create(options);
+    pipeline
+        .apply(
+            Create.of(KV.of("foo", 1L), KV.of("foo", 2L), KV.of("bar", 3L))
+                .withCoder(KvCoder.of(StringUtf8Coder.of(), VarLongCoder.of())))
+        .apply(TEST_GBK, GroupByKey.create());
+
+    translator.translate(pipeline);
+    return env.getStreamGraph();
+  }
+
+  private static List<String> operatorNames(StreamGraph streamGraph) {
+    return streamGraph.getStreamNodes().stream()
+        .map(StreamNode::getOperatorName)
+        .sorted()
+        .collect(Collectors.toList());
+  }
 
   @Test
   public void testAutoBalanceShardKeyResolvesMaxParallelism() {

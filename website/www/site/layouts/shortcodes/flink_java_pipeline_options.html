@@ -53,6 +53,11 @@ Should be called before running the tests.
   <td>Default: <code>EXACTLY_ONCE</code></td>
 </tr>
 <tr>
+  <td><code>disableBatchGroupByKeyPreAggregation</code></td>
+  <td>Disable mapper-side pre-aggregation for bounded batch GroupByKey transforms and send individual input records to the keyed GBK operator. This can prevent oversized partial iterables, but may increase shuffle volume. No effect in streaming mode.</td>
+  <td>Default: <code>false</code></td>
+</tr>
+<tr>
   <td><code>disableMetrics</code></td>
   <td>Disable Beam metrics in Flink Runner</td>
   <td>Default: <code>false</code></td>

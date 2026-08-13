@@ -97,6 +97,7 @@ public class FlinkPipelineOptionsTest {
     assertThat(options.getAllowNonRestoredState(), is(false));
     assertThat(options.getDisableMetrics(), is(false));
     assertThat(options.getFasterCopy(), is(false));
+    assertThat(options.getDisableBatchGroupByKeyPreAggregation(), is(false));
 
     assertThat(options.isStreaming(), is(false));
     assertThat(options.getMaxBundleSize(), is(5000L));
@@ -107,6 +108,23 @@ public class FlinkPipelineOptionsTest {
     optionsStreaming.setStreaming(true);
     assertThat(optionsStreaming.getMaxBundleSize(), is(1000L));
     assertThat(optionsStreaming.getMaxBundleTimeMills(), is(1000L));
+  }
+
+  @Test
+  public void testDisableBatchGroupByKeyPreAggregationParses() {
+    FlinkPipelineOptions options =
+        PipelineOptionsFactory.fromArgs("--disableBatchGroupByKeyPreAggregation=true")
+            .as(FlinkPipelineOptions.class);
+
+    assertThat(options.getDisableBatchGroupByKeyPreAggregation(), is(true));
+    assertThat(options.isStreaming(), is(false));
+
+    FlinkPipelineOptions streamingOptions =
+        PipelineOptionsFactory.fromArgs(
+                "--streaming=true", "--disableBatchGroupByKeyPreAggregation=true")
+            .as(FlinkPipelineOptions.class);
+    assertThat(streamingOptions.isStreaming(), is(true));
+    assertThat(streamingOptions.getDisableBatchGroupByKeyPreAggregation(), is(true));
   }
 
   @Test(expected = Exception.class)
