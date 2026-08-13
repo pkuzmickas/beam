@@ -959,10 +959,14 @@ class FlinkStreamingTransformTranslators {
 
       SingleOutputStreamOperator<WindowedValue<KV<K, Iterable<InputT>>>> outDataStream;
       // Pre-aggregate before shuffle similar to group combine
-      if (!context.isStreaming()) {
+      if (!context.isStreaming()
+          && !context
+              .getPipelineOptions()
+              .as(FlinkPipelineOptions.class)
+              .getDisableBatchGroupByKeyPreAggregation()) {
         outDataStream = FlinkStreamingAggregationsTranslators.batchGroupByKey(context, transform);
       } else {
-        // No pre-aggregation in Streaming mode.
+        // Do not pre-aggregate in streaming mode or when explicitly disabled for batch.
         KvToFlinkKeyKeySelector<K, InputT> keySelector =
             new KvToFlinkKeyKeySelector<>(inputKvCoder.getKeyCoder());
 

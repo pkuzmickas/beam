@@ -366,6 +366,15 @@ public interface FlinkPipelineOptions
   void setFasterCopy(Boolean fasterCopy);
 
   @Description(
+      "Disable mapper-side pre-aggregation for bounded batch GroupByKey transforms and send "
+          + "individual input records to the keyed GBK operator. This can prevent oversized "
+          + "partial iterables, but may increase shuffle volume. No effect in streaming mode.")
+  @Default.Boolean(false)
+  Boolean getDisableBatchGroupByKeyPreAggregation();
+
+  void setDisableBatchGroupByKeyPreAggregation(Boolean disableBatchGroupByKeyPreAggregation);
+
+  @Description(
       "Directory containing Flink YAML configuration files. "
           + "These properties will be set to all jobs submitted to Flink and take precedence "
           + "over configurations in FLINK_CONF_DIR.")
