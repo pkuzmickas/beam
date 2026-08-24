@@ -32,6 +32,7 @@
 ## New Features / Improvements
 
 * X feature added (Java/Python) ([#X](https://github.com/apache/beam/issues/X)).
+* Added opt-in caching of materialized side-input views for Flink DataStream batch execution with `--cacheSideInputMaterialization=true` (Java) ([#39866](https://github.com/apache/beam/issues/39866)).
 
 ## Breaking Changes
 
