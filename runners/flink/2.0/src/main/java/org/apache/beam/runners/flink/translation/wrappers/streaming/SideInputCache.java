@@ -35,6 +35,8 @@ final class SideInputCache {
 
   // Materialized view sizes are unknown to the runner, so the cache cannot be bounded by weight;
   // soft values let the JVM reclaim entries under memory pressure instead of failing with OOM.
+  // Operator instances must not clear job entries when they close because peer subtasks and later
+  // operators can still use them. Expiration bounds entries after their last access.
   private static final Cache<Key<?>, Value<?>> MATERIALIZED_SIDE_INPUTS =
       CacheBuilder.newBuilder().expireAfterAccess(5, TimeUnit.MINUTES).softValues().build();
 
@@ -61,10 +63,6 @@ final class SideInputCache {
 
   static void invalidate(JobID jobId, PCollectionView<?> view, BoundedWindow window) {
     MATERIALIZED_SIDE_INPUTS.invalidate(new Key<>(jobId, view, window));
-  }
-
-  static void invalidateAll(JobID jobId) {
-    MATERIALIZED_SIDE_INPUTS.asMap().keySet().removeIf(key -> jobId.equals(key.jobId));
   }
 
   private static final class Key<T> {

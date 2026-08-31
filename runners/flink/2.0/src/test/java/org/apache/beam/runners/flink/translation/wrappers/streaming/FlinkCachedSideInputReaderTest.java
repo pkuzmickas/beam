@@ -61,6 +61,19 @@ public class FlinkCachedSideInputReaderTest {
   }
 
   @Test
+  public void readerInstancesForSameJobShareMaterialization() {
+    JobID jobId = new JobID();
+    PCollectionView<String> view = view();
+    CountingSideInputReader delegate = new CountingSideInputReader("value");
+    Collection<PCollectionView<?>> views = Collections.singleton(view);
+
+    CachedSideInputReader.of(jobId, delegate, views).get(view, GlobalWindow.INSTANCE);
+    CachedSideInputReader.of(jobId, delegate, views).get(view, GlobalWindow.INSTANCE);
+
+    assertThat(delegate.getCount(), is(1));
+  }
+
+  @Test
   public void keyIncludesViewWindowAndJob() {
     PCollectionView<String> firstView = view();
     PCollectionView<String> secondView = view();
@@ -152,24 +165,6 @@ public class FlinkCachedSideInputReaderTest {
     reader.get(nonCacheableView, GlobalWindow.INSTANCE);
     reader.get(nonCacheableView, GlobalWindow.INSTANCE);
 
-    assertThat(delegate.getCount(), is(3));
-  }
-
-  @Test
-  public void invalidateAllRemovesOnlyEntriesOfJob() {
-    JobID firstJob = new JobID();
-    JobID secondJob = new JobID();
-    PCollectionView<String> view = view();
-    CountingSideInputReader delegate = new CountingSideInputReader("value");
-    Collection<PCollectionView<?>> views = Collections.singleton(view);
-    CachedSideInputReader.of(firstJob, delegate, views).get(view, GlobalWindow.INSTANCE);
-    CachedSideInputReader.of(secondJob, delegate, views).get(view, GlobalWindow.INSTANCE);
-
-    SideInputCache.invalidateAll(firstJob);
-
-    CachedSideInputReader.of(secondJob, delegate, views).get(view, GlobalWindow.INSTANCE);
-    assertThat(delegate.getCount(), is(2));
-    CachedSideInputReader.of(firstJob, delegate, views).get(view, GlobalWindow.INSTANCE);
     assertThat(delegate.getCount(), is(3));
   }
 

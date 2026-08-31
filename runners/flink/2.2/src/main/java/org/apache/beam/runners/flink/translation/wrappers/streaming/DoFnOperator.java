@@ -637,9 +637,6 @@ public class DoFnOperator<PreInputT, InputT, OutputT>
   }
 
   void cleanUp() throws Exception {
-    if (sideInputReader instanceof CachedSideInputReader) {
-      SideInputCache.invalidateAll(getContainingTask().getEnvironment().getJobID());
-    }
     Optional.ofNullable(flinkMetricContainer)
         .ifPresent(FlinkMetricContainer::registerMetricsForPipelineResult);
     Optional.ofNullable(checkFinishBundleTimer).ifPresent(timer -> timer.cancel(true));
