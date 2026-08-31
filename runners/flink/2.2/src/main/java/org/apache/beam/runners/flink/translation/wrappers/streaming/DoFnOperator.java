@@ -473,6 +473,7 @@ public class DoFnOperator<PreInputT, InputT, OutputT>
           createSideInputReader(
               cacheableSideInputs,
               getContainingTask().getEnvironment().getJobID(),
+              getContainingTask().getEnvironment().getTaskInfo().getAttemptNumber(),
               sideInputHandler);
 
       Stream<WindowedValue<InputT>> pushedBack = pushedBackElementsHandler.getElements();
@@ -800,15 +801,22 @@ public class DoFnOperator<PreInputT, InputT, OutputT>
     // Invalidate only after the state write: a concurrent reader that re-caches between an
     // earlier invalidation and the write would pin the previous value with no later invalidation.
     for (BoundedWindow window : value.getWindows()) {
-      SideInputCache.invalidate(getContainingTask().getEnvironment().getJobID(), sideInput, window);
+      SideInputCache.invalidate(
+          getContainingTask().getEnvironment().getJobID(),
+          getContainingTask().getEnvironment().getTaskInfo().getAttemptNumber(),
+          sideInput,
+          window);
     }
   }
 
   @VisibleForTesting
   static SideInputReader createSideInputReader(
-      Collection<PCollectionView<?>> cacheableViews, JobID jobId, SideInputReader delegate) {
+      Collection<PCollectionView<?>> cacheableViews,
+      JobID jobId,
+      int attemptNumber,
+      SideInputReader delegate) {
     if (!cacheableViews.isEmpty()) {
-      return CachedSideInputReader.of(jobId, delegate, cacheableViews);
+      return CachedSideInputReader.of(jobId, attemptNumber, delegate, cacheableViews);
     }
     return delegate;
   }

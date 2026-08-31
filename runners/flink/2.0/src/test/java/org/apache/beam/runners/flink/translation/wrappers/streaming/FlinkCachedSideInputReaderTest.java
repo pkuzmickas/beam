@@ -48,12 +48,16 @@ import org.junit.Test;
 /** Tests for cached materialization of Flink side-input views. */
 public class FlinkCachedSideInputReaderTest {
 
+  private static final int INITIAL_ATTEMPT = 0;
+  private static final int RETRY_ATTEMPT = 1;
+
   @Test
   public void repeatedGetMaterializesOnce() {
     JobID jobId = new JobID();
     PCollectionView<String> view = view();
     CountingSideInputReader delegate = new CountingSideInputReader("value");
-    SideInputReader reader = CachedSideInputReader.of(jobId, delegate, Collections.singleton(view));
+    SideInputReader reader =
+        CachedSideInputReader.of(jobId, INITIAL_ATTEMPT, delegate, Collections.singleton(view));
 
     assertThat(reader.get(view, GlobalWindow.INSTANCE), is("value"));
     assertThat(reader.get(view, GlobalWindow.INSTANCE), is("value"));
@@ -67,10 +71,27 @@ public class FlinkCachedSideInputReaderTest {
     CountingSideInputReader delegate = new CountingSideInputReader("value");
     Collection<PCollectionView<?>> views = Collections.singleton(view);
 
-    CachedSideInputReader.of(jobId, delegate, views).get(view, GlobalWindow.INSTANCE);
-    CachedSideInputReader.of(jobId, delegate, views).get(view, GlobalWindow.INSTANCE);
+    CachedSideInputReader.of(jobId, INITIAL_ATTEMPT, delegate, views)
+        .get(view, GlobalWindow.INSTANCE);
+    CachedSideInputReader.of(jobId, INITIAL_ATTEMPT, delegate, views)
+        .get(view, GlobalWindow.INSTANCE);
 
     assertThat(delegate.getCount(), is(1));
+  }
+
+  @Test
+  public void retryAttemptRematerializesValue() {
+    JobID jobId = new JobID();
+    PCollectionView<String> view = view();
+    CountingSideInputReader delegate = new CountingSideInputReader("value");
+    Collection<PCollectionView<?>> views = Collections.singleton(view);
+
+    CachedSideInputReader.of(jobId, INITIAL_ATTEMPT, delegate, views)
+        .get(view, GlobalWindow.INSTANCE);
+    CachedSideInputReader.of(jobId, RETRY_ATTEMPT, delegate, views)
+        .get(view, GlobalWindow.INSTANCE);
+
+    assertThat(delegate.getCount(), is(2));
   }
 
   @Test
@@ -84,10 +105,14 @@ public class FlinkCachedSideInputReaderTest {
     JobID firstJob = new JobID();
 
     Collection<PCollectionView<?>> views = Arrays.asList(firstView, secondView);
-    CachedSideInputReader.of(firstJob, delegate, views).get(firstView, firstWindow);
-    CachedSideInputReader.of(firstJob, delegate, views).get(secondView, firstWindow);
-    CachedSideInputReader.of(firstJob, delegate, views).get(firstView, secondWindow);
-    CachedSideInputReader.of(new JobID(), delegate, views).get(firstView, firstWindow);
+    CachedSideInputReader.of(firstJob, INITIAL_ATTEMPT, delegate, views)
+        .get(firstView, firstWindow);
+    CachedSideInputReader.of(firstJob, INITIAL_ATTEMPT, delegate, views)
+        .get(secondView, firstWindow);
+    CachedSideInputReader.of(firstJob, INITIAL_ATTEMPT, delegate, views)
+        .get(firstView, secondWindow);
+    CachedSideInputReader.of(new JobID(), INITIAL_ATTEMPT, delegate, views)
+        .get(firstView, firstWindow);
 
     assertThat(delegate.getCount(), is(4));
   }
@@ -97,10 +122,11 @@ public class FlinkCachedSideInputReaderTest {
     JobID jobId = new JobID();
     PCollectionView<String> view = view();
     CountingSideInputReader delegate = new CountingSideInputReader("value");
-    SideInputReader reader = CachedSideInputReader.of(jobId, delegate, Collections.singleton(view));
+    SideInputReader reader =
+        CachedSideInputReader.of(jobId, INITIAL_ATTEMPT, delegate, Collections.singleton(view));
 
     reader.get(view, GlobalWindow.INSTANCE);
-    SideInputCache.invalidate(jobId, view, GlobalWindow.INSTANCE);
+    SideInputCache.invalidate(jobId, INITIAL_ATTEMPT, view, GlobalWindow.INSTANCE);
     reader.get(view, GlobalWindow.INSTANCE);
 
     assertThat(delegate.getCount(), is(2));
@@ -111,7 +137,8 @@ public class FlinkCachedSideInputReaderTest {
     JobID jobId = new JobID();
     PCollectionView<String> view = view();
     CountingSideInputReader delegate = new CountingSideInputReader(null);
-    SideInputReader reader = CachedSideInputReader.of(jobId, delegate, Collections.singleton(view));
+    SideInputReader reader =
+        CachedSideInputReader.of(jobId, INITIAL_ATTEMPT, delegate, Collections.singleton(view));
 
     assertThat(reader.get(view, GlobalWindow.INSTANCE), nullValue());
     assertThat(reader.get(view, GlobalWindow.INSTANCE), nullValue());
@@ -127,10 +154,12 @@ public class FlinkCachedSideInputReaderTest {
         CachedSideInputReader.cacheableViews(Collections.singleton(view));
 
     assertThat(
-        DoFnOperator.createSideInputReader(Collections.emptyList(), jobId, delegate), is(delegate));
+        DoFnOperator.createSideInputReader(
+            Collections.emptyList(), jobId, INITIAL_ATTEMPT, delegate),
+        is(delegate));
 
     assertThat(
-        DoFnOperator.createSideInputReader(cacheableViews, jobId, delegate),
+        DoFnOperator.createSideInputReader(cacheableViews, jobId, INITIAL_ATTEMPT, delegate),
         instanceOf(CachedSideInputReader.class));
   }
 
@@ -158,7 +187,8 @@ public class FlinkCachedSideInputReaderTest {
     PCollectionView<String> nonCacheableView = view();
     CountingSideInputReader delegate = new CountingSideInputReader("value");
     SideInputReader reader =
-        CachedSideInputReader.of(new JobID(), delegate, Collections.singleton(cacheableView));
+        CachedSideInputReader.of(
+            new JobID(), INITIAL_ATTEMPT, delegate, Collections.singleton(cacheableView));
 
     reader.get(cacheableView, GlobalWindow.INSTANCE);
     reader.get(cacheableView, GlobalWindow.INSTANCE);
@@ -174,6 +204,7 @@ public class FlinkCachedSideInputReaderTest {
     SideInputReader reader =
         CachedSideInputReader.of(
             new JobID(),
+            INITIAL_ATTEMPT,
             new SideInputReader() {
               @Override
               public <T> @Nullable T get(PCollectionView<T> view, BoundedWindow window) {

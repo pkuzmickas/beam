@@ -34,8 +34,11 @@ import org.joda.time.Duration;
 public final class CachedSideInputReader implements SideInputReader {
 
   public static CachedSideInputReader of(
-      JobID jobId, SideInputReader delegate, Collection<PCollectionView<?>> cacheableViews) {
-    return new CachedSideInputReader(jobId, delegate, cacheableViews);
+      JobID jobId,
+      int attemptNumber,
+      SideInputReader delegate,
+      Collection<PCollectionView<?>> cacheableViews) {
+    return new CachedSideInputReader(jobId, attemptNumber, delegate, cacheableViews);
   }
 
   static Collection<PCollectionView<?>> cacheableViews(Collection<PCollectionView<?>> sideInputs) {
@@ -54,12 +57,17 @@ public final class CachedSideInputReader implements SideInputReader {
   }
 
   private final JobID jobId;
+  private final int attemptNumber;
   private final SideInputReader delegate;
   private final Collection<PCollectionView<?>> cacheableViews;
 
   private CachedSideInputReader(
-      JobID jobId, SideInputReader delegate, Collection<PCollectionView<?>> cacheableViews) {
+      JobID jobId,
+      int attemptNumber,
+      SideInputReader delegate,
+      Collection<PCollectionView<?>> cacheableViews) {
     this.jobId = jobId;
+    this.attemptNumber = attemptNumber;
     this.delegate = delegate;
     this.cacheableViews = cacheableViews;
   }
@@ -69,7 +77,8 @@ public final class CachedSideInputReader implements SideInputReader {
     if (!cacheableViews.contains(view)) {
       return delegate.get(view, window);
     }
-    return SideInputCache.getOrMaterialize(jobId, view, window, () -> delegate.get(view, window));
+    return SideInputCache.getOrMaterialize(
+        jobId, attemptNumber, view, window, () -> delegate.get(view, window));
   }
 
   @Override
