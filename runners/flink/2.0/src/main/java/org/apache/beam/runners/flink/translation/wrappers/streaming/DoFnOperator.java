@@ -163,6 +163,7 @@ public class DoFnOperator<PreInputT, InputT, OutputT>
   protected final List<TupleTag<?>> additionalOutputTags;
 
   protected final Collection<PCollectionView<?>> sideInputs;
+  private final Collection<PCollectionView<?>> cacheableSideInputs;
   protected final Map<Integer, PCollectionView<?>> sideInputTagMapping;
 
   protected final WindowingStrategy<?, ?> windowingStrategy;
@@ -298,6 +299,7 @@ public class DoFnOperator<PreInputT, InputT, OutputT>
     this.additionalOutputTags = additionalOutputTags;
     this.sideInputTagMapping = sideInputTagMapping;
     this.sideInputs = sideInputs;
+    this.cacheableSideInputs = CachedSideInputReader.cacheableViews(sideInputs);
     this.serializedOptions = new SerializablePipelineOptions(options);
     this.isStreaming = serializedOptions.get().as(FlinkPipelineOptions.class).isStreaming();
     this.windowingStrategy = windowingStrategy;
@@ -469,8 +471,7 @@ public class DoFnOperator<PreInputT, InputT, OutputT>
       sideInputHandler = new SideInputHandler(sideInputs, sideInputStateInternals);
       sideInputReader =
           createSideInputReader(
-              isStreaming,
-              serializedOptions.get().as(FlinkPipelineOptions.class),
+              cacheableSideInputs,
               getContainingTask().getEnvironment().getJobID(),
               sideInputHandler);
 
@@ -808,9 +809,9 @@ public class DoFnOperator<PreInputT, InputT, OutputT>
 
   @VisibleForTesting
   static SideInputReader createSideInputReader(
-      boolean isStreaming, FlinkPipelineOptions options, JobID jobId, SideInputReader delegate) {
-    if (!isStreaming && options.getCacheSideInputMaterialization()) {
-      return CachedSideInputReader.of(jobId, delegate);
+      Collection<PCollectionView<?>> cacheableViews, JobID jobId, SideInputReader delegate) {
+    if (!cacheableViews.isEmpty()) {
+      return CachedSideInputReader.of(jobId, delegate, cacheableViews);
     }
     return delegate;
   }
