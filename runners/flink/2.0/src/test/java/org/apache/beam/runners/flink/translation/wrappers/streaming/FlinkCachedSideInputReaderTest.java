@@ -17,22 +17,27 @@
  */
 package org.apache.beam.runners.flink.translation.wrappers.streaming;
 
+import static org.apache.beam.sdk.transforms.Materializations.ITERABLE_MATERIALIZATION_URN;
+import static org.apache.beam.sdk.transforms.Materializations.MULTIMAP_MATERIALIZATION_URN;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.Assert.assertThrows;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.beam.runners.core.SideInputReader;
-import org.apache.beam.runners.flink.FlinkPipelineOptions;
-import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import org.apache.beam.sdk.transforms.Materialization;
+import org.apache.beam.sdk.transforms.ViewFn;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.values.PCollectionView;
-import org.apache.flink.api.common.JobID;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 import org.junit.Test;
@@ -42,10 +47,9 @@ public class FlinkCachedSideInputReaderTest {
 
   @Test
   public void repeatedGetMaterializesOnce() {
-    JobID jobId = new JobID();
     PCollectionView<String> view = view();
     CountingSideInputReader delegate = new CountingSideInputReader("value");
-    SideInputReader reader = CachedSideInputReader.of(jobId, delegate);
+    SideInputReader reader = CachedSideInputReader.of(delegate, Collections.singleton(view));
 
     assertThat(reader.get(view, GlobalWindow.INSTANCE), is("value"));
     assertThat(reader.get(view, GlobalWindow.INSTANCE), is("value"));
@@ -53,32 +57,64 @@ public class FlinkCachedSideInputReaderTest {
   }
 
   @Test
-  public void keyIncludesViewWindowAndJob() {
+  public void readersDoNotShareCachedValues() {
+    PCollectionView<String> view = view();
+    CountingSideInputReader firstDelegate = new CountingSideInputReader("first");
+    CountingSideInputReader secondDelegate = new CountingSideInputReader("second");
+    SideInputReader firstReader =
+        CachedSideInputReader.of(firstDelegate, Collections.singleton(view));
+    SideInputReader secondReader =
+        CachedSideInputReader.of(secondDelegate, Collections.singleton(view));
+
+    assertThat(firstReader.get(view, GlobalWindow.INSTANCE), is("first"));
+    assertThat(secondReader.get(view, GlobalWindow.INSTANCE), is("second"));
+    assertThat(firstDelegate.getCount(), is(1));
+    assertThat(secondDelegate.getCount(), is(1));
+  }
+
+  @Test
+  public void keyIncludesViewAndWindow() {
     PCollectionView<String> firstView = view();
     PCollectionView<String> secondView = view();
     IntervalWindow firstWindow = new IntervalWindow(Instant.EPOCH, Instant.ofEpochMilli(10));
     IntervalWindow secondWindow =
         new IntervalWindow(Instant.ofEpochMilli(10), Instant.ofEpochMilli(20));
     CountingSideInputReader delegate = new CountingSideInputReader("value");
-    JobID firstJob = new JobID();
+    SideInputReader reader =
+        CachedSideInputReader.of(delegate, Arrays.asList(firstView, secondView));
 
-    CachedSideInputReader.of(firstJob, delegate).get(firstView, firstWindow);
-    CachedSideInputReader.of(firstJob, delegate).get(secondView, firstWindow);
-    CachedSideInputReader.of(firstJob, delegate).get(firstView, secondWindow);
-    CachedSideInputReader.of(new JobID(), delegate).get(firstView, firstWindow);
+    reader.get(firstView, firstWindow);
+    reader.get(secondView, firstWindow);
+    reader.get(firstView, secondWindow);
+    reader.get(firstView, firstWindow);
 
-    assertThat(delegate.getCount(), is(4));
+    assertThat(delegate.getCount(), is(3));
   }
 
   @Test
-  public void invalidateRematerializesValue() {
-    JobID jobId = new JobID();
+  public void invalidateRematerializesLocalValue() {
+    PCollectionView<String> view = view();
+    CountingSideInputReader delegate = new CountingSideInputReader("old");
+    CachedSideInputReader reader =
+        (CachedSideInputReader) CachedSideInputReader.of(delegate, Collections.singleton(view));
+
+    assertThat(reader.get(view, GlobalWindow.INSTANCE), is("old"));
+    delegate.setValue("new");
+    reader.invalidate(view, GlobalWindow.INSTANCE);
+
+    assertThat(reader.get(view, GlobalWindow.INSTANCE), is("new"));
+    assertThat(delegate.getCount(), is(2));
+  }
+
+  @Test
+  public void invalidateAllRematerializesValues() {
     PCollectionView<String> view = view();
     CountingSideInputReader delegate = new CountingSideInputReader("value");
-    SideInputReader reader = CachedSideInputReader.of(jobId, delegate);
+    CachedSideInputReader reader =
+        (CachedSideInputReader) CachedSideInputReader.of(delegate, Collections.singleton(view));
 
     reader.get(view, GlobalWindow.INSTANCE);
-    SideInputCache.invalidate(jobId, view, GlobalWindow.INSTANCE);
+    reader.invalidateAll();
     reader.get(view, GlobalWindow.INSTANCE);
 
     assertThat(delegate.getCount(), is(2));
@@ -86,10 +122,9 @@ public class FlinkCachedSideInputReaderTest {
 
   @Test
   public void cachesNull() {
-    JobID jobId = new JobID();
     PCollectionView<String> view = view();
     CountingSideInputReader delegate = new CountingSideInputReader(null);
-    SideInputReader reader = CachedSideInputReader.of(jobId, delegate);
+    SideInputReader reader = CachedSideInputReader.of(delegate, Collections.singleton(view));
 
     assertThat(reader.get(view, GlobalWindow.INSTANCE), nullValue());
     assertThat(reader.get(view, GlobalWindow.INSTANCE), nullValue());
@@ -97,42 +132,37 @@ public class FlinkCachedSideInputReaderTest {
   }
 
   @Test
-  public void optionWrapsOnlyBatchReaderWhenEnabled() {
-    JobID jobId = new JobID();
+  public void automaticallyWrapsOnlyMultimapViews() {
     SideInputReader delegate = new CountingSideInputReader("value");
-    FlinkPipelineOptions options = PipelineOptionsFactory.as(FlinkPipelineOptions.class);
+    PCollectionView<String> multimapView = view(MULTIMAP_MATERIALIZATION_URN);
+    PCollectionView<String> iterableView = view(ITERABLE_MATERIALIZATION_URN);
 
-    assertThat(DoFnOperator.createSideInputReader(false, options, jobId, delegate), is(delegate));
-
-    options.setCacheSideInputMaterialization(true);
     assertThat(
-        DoFnOperator.createSideInputReader(false, options, jobId, delegate),
+        DoFnOperator.createSideInputReader(Collections.singleton(multimapView), delegate),
         instanceOf(CachedSideInputReader.class));
-    assertThat(DoFnOperator.createSideInputReader(true, options, jobId, delegate), is(delegate));
+    assertThat(
+        DoFnOperator.createSideInputReader(Collections.singleton(iterableView), delegate),
+        is(delegate));
   }
 
   @Test
-  public void invalidateAllRemovesOnlyEntriesOfJob() {
-    JobID firstJob = new JobID();
-    JobID secondJob = new JobID();
-    PCollectionView<String> view = view();
+  public void nonMultimapViewAlwaysUsesDelegate() {
+    PCollectionView<String> view = view(ITERABLE_MATERIALIZATION_URN);
     CountingSideInputReader delegate = new CountingSideInputReader("value");
-    CachedSideInputReader.of(firstJob, delegate).get(view, GlobalWindow.INSTANCE);
-    CachedSideInputReader.of(secondJob, delegate).get(view, GlobalWindow.INSTANCE);
+    SideInputReader reader = CachedSideInputReader.of(delegate, Collections.singleton(view));
 
-    SideInputCache.invalidateAll(firstJob);
+    reader.get(view, GlobalWindow.INSTANCE);
+    reader.get(view, GlobalWindow.INSTANCE);
 
-    CachedSideInputReader.of(secondJob, delegate).get(view, GlobalWindow.INSTANCE);
+    assertThat(reader, is(delegate));
     assertThat(delegate.getCount(), is(2));
-    CachedSideInputReader.of(firstJob, delegate).get(view, GlobalWindow.INSTANCE);
-    assertThat(delegate.getCount(), is(3));
   }
 
   @Test
   public void materializationExceptionPropagatesUnwrapped() {
+    PCollectionView<String> view = view();
     SideInputReader reader =
         CachedSideInputReader.of(
-            new JobID(),
             new SideInputReader() {
               @Override
               public <T> @Nullable T get(PCollectionView<T> view, BoundedWindow window) {
@@ -148,21 +178,32 @@ public class FlinkCachedSideInputReaderTest {
               public boolean isEmpty() {
                 return false;
               }
-            });
+            },
+            Collections.singleton(view));
 
     IllegalStateException exception =
-        assertThrows(IllegalStateException.class, () -> reader.get(view(), GlobalWindow.INSTANCE));
+        assertThrows(IllegalStateException.class, () -> reader.get(view, GlobalWindow.INSTANCE));
     assertThat(exception.getMessage(), is("materialization failed"));
   }
 
-  @SuppressWarnings("unchecked")
   private static <T> PCollectionView<T> view() {
-    return mock(PCollectionView.class);
+    return view(MULTIMAP_MATERIALIZATION_URN);
+  }
+
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  private static <T> PCollectionView<T> view(String materializationUrn) {
+    PCollectionView<T> view = mock(PCollectionView.class);
+    ViewFn viewFn = mock(ViewFn.class);
+    Materialization materialization = mock(Materialization.class);
+    doReturn(viewFn).when(view).getViewFn();
+    doReturn(materialization).when(viewFn).getMaterialization();
+    when(materialization.getUrn()).thenReturn(materializationUrn);
+    return view;
   }
 
   private static final class CountingSideInputReader implements SideInputReader {
     private final AtomicInteger getCount = new AtomicInteger();
-    private final @Nullable Object value;
+    private @Nullable Object value;
 
     private CountingSideInputReader(@Nullable Object value) {
       this.value = value;
@@ -187,6 +228,10 @@ public class FlinkCachedSideInputReaderTest {
 
     private int getCount() {
       return getCount.get();
+    }
+
+    private void setValue(@Nullable Object value) {
+      this.value = value;
     }
   }
 }

@@ -96,7 +96,6 @@ import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Joiner;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
-import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.operators.ProcessingTimeService.ProcessingTimeCallback;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
@@ -467,12 +466,7 @@ public class DoFnOperator<PreInputT, InputT, OutputT>
               serializedOptions);
 
       sideInputHandler = new SideInputHandler(sideInputs, sideInputStateInternals);
-      sideInputReader =
-          createSideInputReader(
-              isStreaming,
-              serializedOptions.get().as(FlinkPipelineOptions.class),
-              getContainingTask().getEnvironment().getJobID(),
-              sideInputHandler);
+      sideInputReader = createSideInputReader(sideInputs, sideInputHandler);
 
       Stream<WindowedValue<InputT>> pushedBack = pushedBackElementsHandler.getElements();
       long min =
@@ -637,7 +631,7 @@ public class DoFnOperator<PreInputT, InputT, OutputT>
 
   void cleanUp() throws Exception {
     if (sideInputReader instanceof CachedSideInputReader) {
-      SideInputCache.invalidateAll(getContainingTask().getEnvironment().getJobID());
+      ((CachedSideInputReader) sideInputReader).invalidateAll();
     }
     Optional.ofNullable(flinkMetricContainer)
         .ifPresent(FlinkMetricContainer::registerMetricsForPipelineResult);
@@ -799,20 +793,18 @@ public class DoFnOperator<PreInputT, InputT, OutputT>
 
     PCollectionView<?> sideInput = sideInputTagMapping.get(streamRecord.getValue().getUnionTag());
     sideInputHandler.addSideInputValue(sideInput, value);
-    // Invalidate only after the state write: a concurrent reader that re-caches between an
-    // earlier invalidation and the write would pin the previous value with no later invalidation.
-    for (BoundedWindow window : value.getWindows()) {
-      SideInputCache.invalidate(getContainingTask().getEnvironment().getJobID(), sideInput, window);
+    if (sideInputReader instanceof CachedSideInputReader) {
+      CachedSideInputReader cachedSideInputReader = (CachedSideInputReader) sideInputReader;
+      for (BoundedWindow window : value.getWindows()) {
+        cachedSideInputReader.invalidate(sideInput, window);
+      }
     }
   }
 
   @VisibleForTesting
   static SideInputReader createSideInputReader(
-      boolean isStreaming, FlinkPipelineOptions options, JobID jobId, SideInputReader delegate) {
-    if (!isStreaming && options.getCacheSideInputMaterialization()) {
-      return CachedSideInputReader.of(jobId, delegate);
-    }
-    return delegate;
+      Collection<PCollectionView<?>> sideInputs, SideInputReader delegate) {
+    return CachedSideInputReader.of(delegate, sideInputs);
   }
 
   @Override
