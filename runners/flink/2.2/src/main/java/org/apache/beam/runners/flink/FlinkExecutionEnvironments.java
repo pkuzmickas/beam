@@ -28,6 +28,7 @@ import java.util.Objects;
 import java.util.stream.Collectors;
 import org.apache.beam.runners.core.construction.SerializablePipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
@@ -37,6 +38,7 @@ import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.net.HostAndPor
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.RuntimeExecutionMode;
 import org.apache.flink.api.common.serialization.SerializerConfigImpl;
+import org.apache.flink.api.java.typeutils.runtime.kryo.JavaSerializer;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.CoreOptions;
@@ -298,10 +300,9 @@ public class FlinkExecutionEnvironments {
 
   private static void configureCustomKryoSerializers(ExecutionConfig config) {
     SerializerConfigImpl serializerConfig = (SerializerConfigImpl) config.getSerializerConfig();
-    // Force Beam schema to use JavaSerializer to fix serialization involving ImmutableMap
-    serializerConfig.registerTypeWithKryoSerializer(
-        org.apache.beam.sdk.schemas.Schema.class,
-        com.esotericsoftware.kryo.serializers.JavaSerializer.class);
+    // Use Java serialization for Schema's immutable collections. Flink's implementation is loaded
+    // with Flink's Kryo, even when the user-code classloader contains a separate Kryo dependency.
+    serializerConfig.registerTypeWithKryoSerializer(Schema.class, JavaSerializer.class);
   }
 
   private static class GlobalJobParametersImpl extends ExecutionConfig.GlobalJobParameters {
